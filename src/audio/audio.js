@@ -96,9 +96,13 @@ export function createAudio() {
     if (missing.has(id)) return Promise.resolve(null);
     if (pending.has(id)) return pending.get(id);
     const attempt = async () => {
+      // A sound may name a different file than its own id. That keeps the VOICE PROFILE (how many may
+      // overlap, how often, how loud) separate from WHICH recording plays — so a sound can be swapped
+      // without inheriting the limits of whatever it borrowed.
+      const file = (AUDIO.sounds[id] && AUDIO.sounds[id].file) || id;
       for (const ext of formats) {
         try {
-          const res = await fetch(url(id, ext));
+          const res = await fetch(url(file, ext));
           if (!res.ok) continue;
           const bytes = await res.arrayBuffer();
           const buf = await decode(bytes);

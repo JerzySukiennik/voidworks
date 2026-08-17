@@ -584,7 +584,11 @@ export const AUDIO = {
     'upgrade-d': { bus: 'sfx', gain: 0.495, active: 0.066, max: 5, cooldown: 0.045, pitchVar: 0.045, gainVar: 0.16 },
     'upgrade-e': { bus: 'sfx', gain: 0.532, active: 0.059, max: 5, cooldown: 0.045, pitchVar: 0.045, gainVar: 0.16 },
 
-    sell: { bus: 'sfx', gain: 0.46, active: 0.273, max: 5, cooldown: 0.05, pitchVar: 0.05, gainVar: 0.18 },
+    // Jurek's call: every sale gets the richer sell-big recording, not just the rare ones. It borrows
+    // the FILE but keeps a common-event voice profile — sell-big's own 2 voices / 280 ms was tuned for
+    // something that fires occasionally, and would have dropped most sales on a busy line. Longer and
+    // louder than the old sell, so fewer overlaps and a touch less gain than sell-big carries alone.
+    sell: { bus: 'sfx', file: 'sell-big', gain: 0.72, active: 0.556, max: 4, cooldown: 0.13, pitchVar: 0.05, gainVar: 0.14 },
     'sell-big': { bus: 'sfx', gain: 0.969, active: 0.556, max: 2, cooldown: 0.28, pitchVar: 0.02, gainVar: 0.06 },
 
     // Gamble Press ate the item. Fires at a 20% rate on a busy line, so it is held tight.

@@ -6,7 +6,6 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { RENDER, CAMERA } from '../config.js';
 
@@ -20,33 +19,11 @@ export function markTransparent(object3D) {
   return object3D;
 }
 
-// The AO g-buffer must only ever see opaque geometry that genuinely occludes. Rather than trusting
-// every piece to remember markTransparent(), this is an allow-list: anything that is not a plain
-// opaque Mesh/InstancedMesh/BatchedMesh/SkinnedMesh is refused. A Sprite let through stamps an
-// opaque card into the normal buffer and GTAO shades a black rectangle behind it — that bug has
-// already happened once here, and the fix that survives is the one nobody has to remember.
-function opaqueMaterial(m) {
-  if (!m) return false;
-  if (m.transparent === true) return false;
-  if (m.depthWrite === false) return false;
-  if (m.blending !== undefined && m.blending !== THREE.NormalBlending) return false;
-  if (m.opacity !== undefined && m.opacity < 1) return false;
-  return true;
-}
-
-function excludedFromAO(o) {
-  if (o.layers.isEnabled(LAYER_NO_AO)) return true;
-  const isGBufferMesh = o.isMesh || o.isInstancedMesh || o.isBatchedMesh || o.isSkinnedMesh;
-  if (!isGBufferMesh) {
-    // Groups and Object3D containers carry no geometry, so letting them through is harmless and
-    // keeps their children visible; anything else drawable (Sprite, Points, Line, LOD proxies)
-    // is refused outright.
-    return o.isObject3D === true && o.type !== 'Group' && o.type !== 'Object3D' && o.type !== 'Scene';
-  }
-  const m = o.material;
-  if (Array.isArray(m)) return !m.every(opaqueMaterial);
-  return !opaqueMaterial(m);
-}
+// NOTE: the AO g-buffer allow-list that used to live here is gone. GTAO no longer renders its own
+// g-buffer at all — it reads the depth RenderPass wrote — so "what may enter the g-buffer" is now
+// decided by depthWrite, which the transparent pieces already set correctly. LAYER_NO_AO and
+// markTransparent stay exported because other pieces call them and because they remain the right
+// marker if a future pass ever needs a scene-wide "this is see-through" hint.
 
 // three.js hard-codes VSM's light-bleed reduction at 0.3 and exposes no uniform for it. At 0.3 a
 // half-float moment pair carries enough numerical noise that a shadow thrown more than a couple of
@@ -77,9 +54,16 @@ function patchShadowBleed(bleed) {
 //          where a near-white gradient goes to die, so the void is clamped clear of it
 //
 // plus a dither, because a 20-value ramp across 1600px WILL band on an 8-bit display.
+//
+// This pass also does the job OutputPass used to: tone mapping and the sRGB transfer. On this GPU a
+// single full-resolution pass over a 2400x1500 half-float buffer costs 2-4 ms, so a pass that exists
+// only to convert colour space is a pass worth not having. The order inside the shader reproduces
+// the old two-pass chain exactly — tone map, encode, THEN gain — so the grade's tuning still means
+// what it meant when it was applied to OutputPass's output.
 const VoidGradeShader = {
   uniforms: {
     tDiffuse: { value: null },
+    vwExposure: { value: RENDER.exposure },
     amount: { value: RENDER.vignette.amount },
     softness: { value: RENDER.vignette.softness },
     tilt: { value: RENDER.vignette.tilt },
@@ -96,6 +80,31 @@ const VoidGradeShader = {
     void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
   `,
   fragmentShader: `
+    // Written out rather than pulled from THREE.ShaderChunk: three already auto-injects the
+    // colour-space chunk into every ShaderMaterial, so including it here is a redefinition error,
+    // and it injects the tone-mapping chunk only when the pass happens to render to the screen —
+    // which changes with quality tier. Owning both functions keeps the pass identical either way.
+    vec3 vwNeutralToneMapping(vec3 color) {
+      const float StartCompression = 0.8 - 0.04;
+      const float Desaturation = 0.15;
+      float x = min(color.r, min(color.g, color.b));
+      float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+      color -= offset;
+      float peak = max(color.r, max(color.g, color.b));
+      if (peak < StartCompression) return color;
+      float d = 1.0 - StartCompression;
+      float newPeak = 1.0 - d * d / (peak + d - StartCompression);
+      color *= newPeak / peak;
+      float g = 1.0 - 1.0 / (Desaturation * (peak - newPeak) + 1.0);
+      return mix(color, vec3(newPeak), g);
+    }
+    vec3 vwSRGB(vec3 v) {
+      return mix(pow(v, vec3(0.41666)) * 1.055 - vec3(0.055), v * 12.92, vec3(lessThanEqual(v, vec3(0.0031308))));
+    }
+    // NOT named toneMappingExposure: three injects its own tone-mapping chunk (which declares that
+    // exact uniform) into any ShaderMaterial that renders straight to the screen, and this pass is
+    // last on the tiers without SMAA. Same name = redefinition = the whole chain fails to compile.
+    uniform float vwExposure;
     uniform sampler2D tDiffuse;
     uniform float amount, softness, tilt, lobe, floorLevel, grain, aspect;
     uniform vec2 lightDir;
@@ -103,6 +112,7 @@ const VoidGradeShader = {
     varying vec2 vUv;
     void main() {
       vec4 c = texture2D(tDiffuse, vUv);
+      c.rgb = vwSRGB(vwNeutralToneMapping(max(c.rgb, 0.0) * vwExposure));
       vec2 p = (vUv - 0.5) * vec2(aspect, 1.0);
       float halfDiag = length(vec2(aspect, 1.0) * 0.5);
       float d = length(p) / halfDiag;
@@ -272,14 +282,31 @@ export function createScene(canvas) {
   }
 
   function buildComposer() {
-    if (composer) composer.dispose();
+    // EffectComposer.dispose() only frees its own two ping-pong targets — the passes keep theirs.
+    // GTAO alone holds six render targets, SMAA three, bloom ten; rebuilding the chain on every
+    // quality switch without this loop leaks all of them and the GPU cost of a frame climbs with
+    // the number of switches, which is exactly the "drift" that made earlier benchmarks worthless.
+    if (composer) {
+      for (const pass of composer.passes) pass.dispose?.();
+      composer.dispose();
+    }
     const [w, h] = drawSize();
     const pr = Math.min(preset.pixelRatioMax, RENDER.pixelRatioMax, devicePixelRatio);
     renderer.setPixelRatio(pr);
 
+    // A depth texture on the composer target is what lets GTAO skip re-drawing the entire scene:
+    // RenderPass writes depth here, GTAO reads it back. RenderPass has needsSwap = false and draws
+    // into readBuffer, so the buffer GTAO receives is exactly the one this depth belongs to.
+    const depthTexture = new THREE.DepthTexture(Math.max(1, w * pr), Math.max(1, h * pr));
+    depthTexture.format = THREE.DepthFormat;
+    depthTexture.type = THREE.UnsignedIntType;
+    depthTexture.minFilter = THREE.NearestFilter;
+    depthTexture.magFilter = THREE.NearestFilter;
+
     const target = new THREE.WebGLRenderTarget(Math.max(1, w * pr), Math.max(1, h * pr), {
       type: THREE.HalfFloatType,
       colorSpace: THREE.LinearSRGBColorSpace,
+      depthTexture,
     });
     composer = new EffectComposer(renderer, target);
     composer.setPixelRatio(pr);
@@ -313,33 +340,31 @@ export function createScene(canvas) {
       });
       // Occlusion is low frequency, so it is gathered at half res and bilinearly upsampled —
       // full-res GTAO alone costs more than the rest of the frame put together.
+      // The single biggest render-side win in this file. By default GTAOPass draws the WHOLE scene
+      // a second time into its own depth+normal g-buffer — at 171 buildings that is ~750 extra draw
+      // calls and two full scene.traverse() walks every frame, and this machine's driver charges
+      // ~25 us per draw call. Handing it the depth RenderPass already wrote drops all of it; normals
+      // are then reconstructed from depth in the shader, which is exactly right for a scene made of
+      // flat-shaded facets.
+      //
+      // It also retires the visibility hack this pass used to need. The old g-buffer render had to
+      // hide transparent sheets (opaque depth made GTAO shade a black mass behind them) and the void
+      // backdrop (a screen-space background landed in the normal buffer as black bars). Main-pass
+      // depth has neither problem by construction: panes and labels are depthWrite:false and the
+      // background never writes depth, so they are already absent.
+      gtao.setGBuffer(depthTexture, undefined);
       const full = gtao.setSize.bind(gtao);
       gtao.setSize = (aw, ah) => {
         full(aw, ah);
-        const sw = Math.max(1, Math.round(aw * RENDER.ao.scale));
-        const sh = Math.max(1, Math.round(ah * RENDER.ao.scale));
+        // Nothing renders into the g-buffer any more; keep it at 1x1 instead of full-screen.
+        gtao.normalRenderTarget.setSize(1, 1);
+        const aoScale = preset.aoScale || RENDER.ao.scale;
+        const sw = Math.max(1, Math.round(aw * aoScale));
+        const sh = Math.max(1, Math.round(ah * aoScale));
         gtao.gtaoRenderTarget.setSize(sw, sh);
         gtao.pdRenderTarget.setSize(sw, sh);
         gtao.gtaoMaterial.uniforms.resolution.value.set(sw, sh);
         gtao.pdMaterial.uniforms.resolution.value.set(sw, sh);
-      };
-      // Two things must stay out of the AO g-buffer. Transparent sheets, because opaque depth makes
-      // GTAO shade a black mass behind them. And the void backdrop, because a screen-space background
-      // texture lands in the normal buffer and stamps black bars over the scene.
-      const baseVisibility = gtao.overrideVisibility.bind(gtao);
-      const baseRestore = gtao.restoreVisibility.bind(gtao);
-      let stashedBackground = null;
-      gtao.overrideVisibility = () => {
-        baseVisibility();
-        stashedBackground = scene.background;
-        scene.background = null;
-        scene.traverse((o) => {
-          if (o !== scene && excludedFromAO(o)) o.visible = false;
-        });
-      };
-      gtao.restoreVisibility = () => {
-        baseRestore();
-        scene.background = stashedBackground;
       };
       gtao.setSize(w, h);
       composer.addPass(gtao);
@@ -361,17 +386,21 @@ export function createScene(canvas) {
       bloom = null;
     }
 
-    composer.addPass(new OutputPass());
+    // Tone map, encode and grade in ONE pass, sitting where OutputPass used to. SMAA still runs
+    // last, on display-referred pixels, which is where its edge detection is designed to work.
+    grade = new ShaderPass(VoidGradeShader);
+    grade.uniforms.aspect.value = w / h;
+    grade.uniforms.vwExposure.value = RENDER.exposure;
+    composer.addPass(grade);
 
     // SMAA rather than MSAA: one full-res pass instead of a 4x half-float resolve, which is
     // what actually fits on an integrated GPU. Flat-shaded facets need clean edges above all.
     smaa = preset.smaa ? new SMAAPass(w, h) : null;
     if (smaa) composer.addPass(smaa);
 
-    grade = new ShaderPass(VoidGradeShader);
-    grade.uniforms.aspect.value = w / h;
-    grade.renderToScreen = true;
-    composer.addPass(grade);
+    // Whatever ends up last goes straight to the default framebuffer instead of through a copy.
+    const lastPass = composer.passes[composer.passes.length - 1];
+    lastPass.renderToScreen = true;
   }
 
   function resize() {

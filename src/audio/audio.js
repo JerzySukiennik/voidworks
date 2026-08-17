@@ -66,17 +66,43 @@ export function createAudio() {
     return new URL(`${id}.${ext}`, root).href;
   }
 
+  // Our .ogg files are Opus, which Safari cannot decode. Ask the browser what it can actually play
+  // instead of trying Opus first and relying on a fallback — a fallback that only runs after a failure
+  // is a fallback nobody tests, and on Safari that meant silence.
+  const formats = (() => {
+    const list = AUDIO.formats.slice();
+    let ok = true;
+    try {
+      const probe = document.createElement('audio');
+      ok = !!probe.canPlayType('audio/ogg; codecs="opus"');
+    } catch {
+      ok = false;
+    }
+    if (ok) return list;
+    return list.filter((e) => e !== 'ogg').concat(list.filter((e) => e === 'ogg'));
+  })();
+
+  // Safari's older decodeAudioData ignores the promise form and only calls back. Wrapping the callback
+  // form works everywhere and cannot silently resolve to undefined.
+  function decode(bytes) {
+    return new Promise((resolve, reject) => {
+      const p = ctx.decodeAudioData(bytes, resolve, reject);
+      if (p && typeof p.then === 'function') p.then(resolve, reject);
+    });
+  }
+
   function load(id) {
     if (buffers.has(id)) return Promise.resolve(buffers.get(id));
     if (missing.has(id)) return Promise.resolve(null);
     if (pending.has(id)) return pending.get(id);
     const attempt = async () => {
-      for (const ext of AUDIO.formats) {
+      for (const ext of formats) {
         try {
           const res = await fetch(url(id, ext));
           if (!res.ok) continue;
           const bytes = await res.arrayBuffer();
-          const buf = await ctx.decodeAudioData(bytes);
+          const buf = await decode(bytes);
+          if (!buf) continue;
           buffers.set(id, buf);
           return buf;
         } catch {

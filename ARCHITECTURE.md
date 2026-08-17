@@ -17,6 +17,21 @@ rewrite it.
 - All 3D models authored in **Blender** → `assets/models/*.glb` (Draco off, glTF binary)
 - All audio fetched from the internet (CC0 first) → `assets/audio/*.ogg|mp3`
 
+## The void beat the benchmark, on purpose (Jurek, 2026-08-17)
+
+A blind judge compared our best screenshot against six real reference shots and picked the real game in
+five of them — scoring us **4/10** — and named exactly one reason: **there is no environment in the
+frame**. Measured, not asserted: our greyscale histogram is bimodal (values cluster at ~0.1 and ~0.9
+with nothing between) where Islanders holds four to five clean value steps. Mid-tones come from ground
+and mid-distance geometry, and we have neither. It tried twelve camera angles; none fixed it.
+
+Its recommendation was to add a floor. **Jurek declined, and that decision stands.** The white void is
+the concept, not an oversight, and it outranks winning a like-for-like comparison with a game that has
+terrain. The "beat a real screenshot in a blind test" goal is therefore **retired** — not failed, and
+not to be quietly reopened by a future agent who reads the 4/10 and assumes it is a bug to fix.
+
+Do not add a floor, a platform, a shadow-catcher or a backdrop plane.
+
 ## There is no ground
 
 **The factory floats.** No floor, no plate, no base, no shadow-catcher, no horizon. Every component

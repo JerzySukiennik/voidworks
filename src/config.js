@@ -91,12 +91,24 @@ export const RENDER = {
   // band by `floor`, which is the lowest the grade is ever allowed to push a white pixel.
   vignette: { amount: 0.13, softness: 0.58, tilt: 0.085, lobe: 0.05, floor: 0.9, grain: 0.005 },
 
+  // Measured on the AMD Radeon Pro 5500M at a 1600x1000 viewport with 220 items in motion, using
+  // work/tools/bench.mjs (serialised frame cost, no instrumentation). Every full-resolution pass
+  // over this buffer costs real milliseconds here, so `pixelRatioMax` is the single strongest knob
+  // in this block — stronger than AO samples, stronger than shadow map size. Treat it that way.
+  //
+  //   low     is the guaranteed-60 tier and must stay inside 16.67 ms. Do not add a pass to it.
+  //   medium  is the everyday tier.
+  //   high    is the screenshot tier and is allowed to cost what it costs.
   quality: {
-    high: { ao: true, bloom: true, smaa: true, shadowMapSize: 2048, shadowType: 'vsm', shadowBlur: 10, pixelRatioMax: 1.5 },
-    medium: { ao: true, bloom: false, smaa: true, shadowMapSize: 1536, shadowType: 'vsm', shadowBlur: 6, pixelRatioMax: 1.25 },
+    high: { ao: true, aoScale: 0.5, bloom: true, smaa: true, shadowMapSize: 2048, shadowType: 'vsm', shadowBlur: 8, pixelRatioMax: 1.25 },
+    // SMAA is off at medium on measured evidence, not taste: it is three full-resolution passes and
+    // ablation puts it at ~40 ms of high's 85 ms frame — the most expensive single thing in the post
+    // chain, more than AO, shadows and the entire building geometry each cost. It stays at `high`,
+    // which is the screenshot tier, and nowhere else.
+    medium: { ao: true, aoScale: 0.4, bloom: false, smaa: false, shadowMapSize: 1024, shadowType: 'vsm', shadowBlur: 4, pixelRatioMax: 1 },
     // low genuinely drops everything expensive: no AO, no bloom, no SMAA, and PCF instead of VSM
     // so the two full-screen shadow-map blur passes stop running every frame as well.
-    low: { ao: false, bloom: false, smaa: false, shadowMapSize: 1024, shadowType: 'pcf', shadowBlur: 0, pixelRatioMax: 1 },
+    low: { ao: false, aoScale: 0.5, bloom: false, smaa: false, shadowMapSize: 1024, shadowType: 'pcf', shadowBlur: 0, pixelRatioMax: 1 },
   },
 };
 

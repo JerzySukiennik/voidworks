@@ -3,7 +3,8 @@
 import * as THREE from 'three';
 import { BUILD, GRID } from '../config.js';
 import { createPicker, dirBetween, inBounds } from '../world/grid.js';
-import { getDef, buildGhost, paneColorFor } from '../world/buildings.js';
+import { getDef, paneColorFor } from '../world/buildings.js';
+import { makeGhost, paintGhost, ghostMaterials } from './ghost.js';
 
 const MAX_RUN = 64;
 
@@ -59,6 +60,8 @@ export function createPlacement(ctx) {
   badMat.color.set(BUILD.ghostInvalid);
   badMat.emissive.set(BUILD.ghostInvalid);
 
+  const gmats = ghostMaterials();
+
   const markerGeo = new THREE.BoxGeometry(0.86, 0.1, 0.86);
   const markers = [];
   for (let i = 0; i < MAX_RUN; i += 1) {
@@ -111,18 +114,13 @@ export function createPlacement(ctx) {
   function ghostFor(d) {
     let g = ghostCache.get(d.id);
     if (!g) {
-      g = buildGhost(d, ghostMat);
+      g = makeGhost(d, world, gmats);
       g.visible = false;
-      g.traverse((o) => { o.castShadow = false; o.receiveShadow = false; });
       layer.add(g);
       noAO(g);
       ghostCache.set(d.id, g);
     }
     return g;
-  }
-
-  function setGhostMaterial(group, m) {
-    for (const child of group.children) child.material = m;
   }
 
   function level() { return def ? def.levels[0] : 0; }
@@ -156,9 +154,9 @@ export function createPlacement(ctx) {
   function updateGhost() {
     if (!ghost || !hasCell) { if (ghost) ghost.visible = false; helper.visible = false; return; }
     ghost.visible = !dragging;
-    ghost.position.set(cell.x, 0, cell.z);
+    ghost.position.set(cell.x, level() * BUILD.levelRise, cell.z);
     ghost.rotation.y = rot * Math.PI * 0.5;
-    setGhostMaterial(ghost, valid ? ghostMat : badMat);
+    paintGhost(ghost, gmats, valid);
     helper.visible = true;
     helper.position.set(cell.x, level() * BUILD.levelRise + 0.002, cell.z);
   }

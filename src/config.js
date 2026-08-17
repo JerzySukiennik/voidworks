@@ -365,14 +365,16 @@ export const NET = {
   // 'local'    — BroadcastChannel + localStorage, same machine, no credentials (also the test driver)
   // 'off'      — refuse to network at all; host/join become no-ops and the game stays singleplayer
   //
-  // HELD AT 'local' ON PURPOSE. The credentials below are real, but the shared database's rules do
-  // not yet contain the `voidworks` block, so every write under /voidworks would be denied. Flip
-  // this to 'auto' in the same change that deploys database.rules.json — not before.
+  // 'auto' since 2026-08-17, when the merged ruleset was deployed to gzowos-games-default-rtdb and
+  // read back to confirm the `voidworks` block landed without disturbing the four neighbours. Until
+  // that deploy this was pinned to 'local', because every write under /voidworks was denied by the
+  // root default-deny; 'auto' would have failed silently. If the rules are ever rolled back, pin it
+  // to 'local' again in the same change — the two belong together.
   //
-  // ?netdriver=firebase overrides it for one page load, which is how the Firebase transport is
-  // tested against the local emulator (?emulator=127.0.0.1:9000) without going near the live
-  // database or changing what everyone else's page load does.
-  driver: (typeof location !== 'undefined' && new URLSearchParams(location.search).get('netdriver')) || 'local',
+  // ?netdriver=local forces the same-machine driver for one page load; ?netdriver=firebase plus
+  // ?emulator=127.0.0.1:9000 points the real transport at the local emulator. Either way it is one
+  // page load and it changes nothing for anybody else.
+  driver: (typeof location !== 'undefined' && new URLSearchParams(location.search).get('netdriver')) || 'auto',
 
   // Fixed by the security rules. The database is SHARED: gzowos-games-default-rtdb already hosts
   // the Gzowo's Games dashboard (presence, sessions, friendAccess, waitlists, ageBands) and three
@@ -435,17 +437,13 @@ export const NET = {
     clientSkewSpreadMs: 2500,
   },
 
-  // EMPTY ON PURPOSE. No Firebase project has been created for Voidworks yet, so `auto` falls
-  // back to the local driver and the game is singleplayer-identical. Filling this in is the only
-  // step needed to go live; see the report in work/ for the exact resources to create.
   // The "Voidworks" web app inside the EXISTING gzowos-games project — no new project was created,
   // because that account is near its project limit. A Firebase web apiKey is a public client
   // identifier, not a secret: it names the project, it authorises nothing. What guards a factory is
   // database.rules.json plus the length of the room code.
   //
-  // NOTE: filling this in does NOT make co-op work on its own. The rules for this database still
-  // have to gain the `voidworks` block (see database.rules.json), and until they do, every write
-  // under /voidworks is denied and the game falls back to the local driver.
+  // This database is SHARED with four other things, which is why the rules for it are generated
+  // rather than authored — see the header of database.rules.json before touching them.
   FIREBASE: {
     apiKey: 'AIzaSyAaTuELH_mToxH3hRJ4WPIVTECSH7Z8-FY',
     authDomain: 'gzowos-games.firebaseapp.com',

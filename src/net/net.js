@@ -74,8 +74,21 @@ export function createNetLink(world) {
   // show the winner's building — the two factories would disagree permanently over one cell.
   const deferred = [];
 
+  // Ids this client's catalogue has never heard of. A room outlives a release: someone on a newer
+  // build can place something this page has no definition for, and a renamed id (belt_turn_l and
+  // belt_turn_r became one rotating belt_turn) does the same thing to an old saved room. Such an
+  // entry can never be placed, so it must be dropped rather than deferred — the deferred list is a
+  // retry queue for cells that are momentarily occupied, and a permanently unplaceable entry would
+  // sit in it being retried every single frame for as long as the room is open.
+  const unknown = new Set();
+
   function applyRemoteBuild(entry) {
     if (byBid.has(entry.bid)) return true;
+    if (unknown.has(entry.bid)) return false;
+    if (!defOf(entry.defId)) {
+      unknown.add(entry.bid);
+      return false;
+    }
     const b = original.place.call(world, entry.defId, entry.x, entry.z, entry.rot, { free: true });
     if (!b) {
       if (!deferred.some((e) => e.bid === entry.bid)) deferred.push(entry);
@@ -105,6 +118,7 @@ export function createNetLink(world) {
   function applyRemoteRemove(entry) {
     const b = byBid.get(entry.bid);
     byBid.delete(entry.bid);
+    unknown.delete(entry.bid);
     if (!b) return;
     bidOf.delete(b);
     // free:true, because the money side of a removal is settled once, by the client that asked
@@ -211,6 +225,7 @@ export function createNetLink(world) {
       byBid.clear();
       bidOf.clear();
       deferred.length = 0;
+      unknown.clear();
       for (const entry of existing) applyRemoteBuild(entry);
       world.flow.relink();
       return;
@@ -222,6 +237,7 @@ export function createNetLink(world) {
     byBid.clear();
     bidOf.clear();
     deferred.length = 0;
+    unknown.clear();
 
     // Published with bounded concurrency, not one at a time. A starter factory is a hundred
     // buildings and each one is a claim plus a write, so strictly sequential publishing made
@@ -311,6 +327,7 @@ export function createNetLink(world) {
     byBid.clear();
     bidOf.clear();
     deferred.length = 0;
+    unknown.clear();
     setStatus('off');
   }
 

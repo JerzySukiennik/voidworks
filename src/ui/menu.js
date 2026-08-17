@@ -236,6 +236,7 @@ export function createMenu(options) {
     sfx: num(stored.sfx, D.sfx),
     quality: SETTINGS.qualityTiers.some((t) => t.id === stored.quality) ? stored.quality : D.quality,
     sensitivity: num(stored.sensitivity, D.sensitivity),
+    resolution: num(stored.resolution, D.resolution),
     name: sanitiseName(stored.name || D.name),
   };
   const backdrop = createBackdrop();
@@ -527,10 +528,14 @@ export function createMenu(options) {
     chip.addEventListener('click', () => {
       settings.quality = tier.id;
       paintQuality();
+  paintResolution();
       persist();
     });
     qualityNodes.push({ chip, tier });
   }
+  // Each tier says what it actually turns off. A setting the player cannot predict is a setting they
+  // will not touch, and this is the one that decides whether the game runs well on their machine.
+  const qualityDesc = el('div', 'vw-note', qualityField.wrap);
   function paintQuality() {
     for (const q of qualityNodes) {
       q.chip.classList.toggle('is-on', q.tier.id === settings.quality);
@@ -538,7 +543,35 @@ export function createMenu(options) {
     }
     const found = SETTINGS.qualityTiers.find((t) => t.id === settings.quality);
     qualityField.value.textContent = found ? found.name : '';
+    qualityDesc.textContent = found && found.desc ? found.desc : '';
   }
+
+  const resField = field(settingsPanel.body, COPY.optResolution, COPY.optResolutionNote);
+  const resNote = el('div', 'vw-note', resField.wrap);
+  const resRange = el('input', 'vw-range', resField.body);
+  resRange.type = 'range';
+  resRange.min = String(SETTINGS.resolutionMin);
+  resRange.max = String(SETTINGS.resolutionMax);
+  resRange.step = '0.05';
+  resRange.value = String(settings.resolution);
+  resRange.setAttribute('aria-label', COPY.optResolution);
+
+  function describeResolution(v) {
+    const native = typeof devicePixelRatio === 'number' ? devicePixelRatio : 1;
+    const pct = Math.round((Math.min(v, native) / native) * 100);
+    if (v >= native) return COPY.optResolutionNative;
+    return COPY.optResolutionSoft.replace('{pct}', String(pct));
+  }
+  function paintResolution() {
+    paintRange(resRange);
+    resField.value.textContent = `${settings.resolution.toFixed(2)}x`;
+    resNote.textContent = describeResolution(settings.resolution);
+  }
+  resRange.addEventListener('input', () => {
+    settings.resolution = Number(resRange.value);
+    paintResolution();
+    persist();
+  });
 
   slider(
     settingsPanel.body,
@@ -582,6 +615,7 @@ export function createMenu(options) {
   navItem(pauseNav, COPY.quit, COPY.quitNote, null, () => setMode('menu'));
 
   paintQuality();
+  paintResolution();
   paintSave();
   paintCoopCta();
 

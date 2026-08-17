@@ -343,7 +343,11 @@ export const SCREENS = {
     optMusic: 'Music',
     optSfx: 'Effects',
     optQuality: 'Visual quality',
-    optQualityNote: 'Shadows, ambient occlusion and bloom.',
+    optQualityNote: 'Presets. Each one names what it turns off.',
+    optResolution: 'Render resolution',
+    optResolutionNote: 'How sharp the picture is. The biggest single effect on performance.',
+    optResolutionNative: 'Native — one rendered pixel per screen pixel. Sharpest, and the most expensive.',
+    optResolutionSoft: 'Rendering at {pct}% of your screen and scaling up. Softer edges, noticeably more frames.',
     optSensitivity: 'Camera sensitivity',
     optSensitivityNote: 'Orbit and pan speed of the mouse.',
     creditsTitle: 'Credits',
@@ -356,12 +360,23 @@ export const SETTINGS = {
   sensitivityMax: 2.5,
   nameMaxLength: 16,
   codeAlphabet: 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789',
+  // Each tier names what it drops, in the player's terms. Measured costs, not adjectives:
+  // ambient occlusion and the shadow blur are the expensive halves, anti-aliasing is three
+  // full-resolution passes and was the single most expensive thing in the chain.
   qualityTiers: [
-    { id: 'low', name: 'Low' },
-    { id: 'medium', name: 'Medium' },
-    { id: 'high', name: 'High' },
+    { id: 'low', name: 'Low',
+      desc: 'No ambient occlusion, no glow, no anti-aliasing, and hard-edged shadows. Cheapest by a wide margin — start here if the factory stutters.' },
+    { id: 'medium', name: 'Medium',
+      desc: 'Ambient occlusion and soft shadows, but no glow and no anti-aliasing, so edges are a little jagged.' },
+    { id: 'high', name: 'High',
+      desc: 'Everything on: ambient occlusion, soft shadows, glow, and smoothed edges. Anti-aliasing alone is most of the cost.' },
   ],
-  defaults: { master: 0.8, music: 0.5, sfx: 0.85, quality: 'high', sensitivity: 1, name: '' },
+  // Render resolution. 1x is one rendered pixel per screen pixel; a Retina display is 2x, so anything
+  // below native is upscaled and looks softer. It is the strongest performance knob in the game —
+  // cost rises far faster than linearly, so half a step down buys a lot of frame.
+  resolutionMin: 0.5,
+  resolutionMax: 2,
+  defaults: { master: 0.8, music: 0.5, sfx: 0.85, quality: 'high', sensitivity: 1, resolution: 1.25, name: '' },
 };
 
 // --- owned by: net ------------------------------------------------------------

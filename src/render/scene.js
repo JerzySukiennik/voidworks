@@ -281,6 +281,8 @@ export function createScene(canvas) {
     return [innerWidth, innerHeight];
   }
 
+  let resolutionScale = null;
+
   function buildComposer() {
     // EffectComposer.dispose() only frees its own two ping-pong targets — the passes keep theirs.
     // GTAO alone holds six render targets, SMAA three, bloom ten; rebuilding the chain on every
@@ -291,7 +293,11 @@ export function createScene(canvas) {
       composer.dispose();
     }
     const [w, h] = drawSize();
-    const pr = Math.min(preset.pixelRatioMax, RENDER.pixelRatioMax, devicePixelRatio);
+    // The player's own resolution choice wins over the tier's default. Render resolution is by far the
+    // strongest cost knob here (0.75 -> 22.8 ms, 1.5 -> 70.4 ms on the same scene), so it is the one
+    // setting worth handing over rather than deciding for them.
+    const want = resolutionScale === null ? preset.pixelRatioMax : resolutionScale;
+    const pr = Math.min(want, RENDER.pixelRatioMax, devicePixelRatio);
     renderer.setPixelRatio(pr);
 
     // A depth texture on the composer target is what lets GTAO skip re-drawing the entire scene:
@@ -427,6 +433,18 @@ export function createScene(canvas) {
     });
   }
 
+  function setResolution(scale) {
+    const v = typeof scale === 'number' && scale > 0 ? scale : null;
+    if (v === resolutionScale) return currentPixelRatio();
+    resolutionScale = v;
+    buildComposer();
+    return currentPixelRatio();
+  }
+
+  function currentPixelRatio() {
+    return renderer.getPixelRatio();
+  }
+
   function setQuality(q) {
     const next = RENDER.quality[q] ? q : 'high';
     if (next === quality && composer) return;
@@ -487,5 +505,8 @@ export function createScene(canvas) {
     },
     resize,
     setQuality,
+    setResolution,
+    currentPixelRatio,
+    get maxPixelRatio() { return Math.min(RENDER.pixelRatioMax, devicePixelRatio); },
   };
 }

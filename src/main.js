@@ -49,10 +49,22 @@ const menu = createMenu({
   onJoin: (name, code) => world.net?.join?.(name, code),
   onSettings: (settings) => {
     view.setQuality?.(settings.quality);
+    // Resolution is applied after the tier, because the tier rebuilds the post chain and would
+    // otherwise reset the player's choice back to its own default.
+    view.setResolution?.(settings.resolution);
     orbit.setSensitivity?.(settings.sensitivity);
     world.audio?.setLevels?.(settings);
   },
 });
+
+// Saved settings only reached the engine when the player moved a control; on a fresh load the game
+// ignored its own stored choice and ran at the tier default.
+if (menu.settings) {
+  view.setQuality?.(menu.settings.quality);
+  view.setResolution?.(menu.settings.resolution);
+  orbit.setSensitivity?.(menu.settings.sensitivity);
+}
+
 menu.show();
 
 progress(1, 'ready');

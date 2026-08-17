@@ -1,0 +1,7 @@
+node_modules/
+work/
+reference/
+*.log
+.DS_Store
+.env
+final.json

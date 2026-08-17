@@ -72,6 +72,15 @@ export function createPlacement(ctx) {
     markers.push(m);
   }
 
+  // A wireframe box, not a filled ghost: it has to read as "this is going away", not "this is landing".
+  const delBox = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+    new THREE.LineBasicMaterial({ color: BUILD.ghostInvalid, transparent: true, opacity: 0.9, depthTest: false }),
+  );
+  delBox.visible = false;
+  delBox.renderOrder = 7;
+  layer.add(delBox);
+
   const helper = makeHelper();
   helper.visible = false;
   layer.add(helper);
@@ -151,7 +160,33 @@ export function createPlacement(ctx) {
     valid = world.canReplace(def, cell.x, cell.z, rot);
   }
 
+  // Delete is the one build action with no preview of its own: you point at a factory and something
+  // vanishes. The outline says exactly which thing, before you commit to losing it.
+  function updateDeleteOutline() {
+    const target = deleteMode && hasCell ? deleteTarget() : null;
+    if (!target) { delBox.visible = false; return; }
+    const d = target.def;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    const ang = (target.rot & 3) * Math.PI * 0.5;
+    const cos = Math.cos(ang);
+    const sin = Math.sin(ang);
+    for (const c of d.cells) {
+      const x = target.cx + c[0] * cos + c[1] * sin;
+      const z = target.cz - c[0] * sin + c[1] * cos;
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+      minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+    }
+    const y = (d.levels[0] || 0) * BUILD.levelRise;
+    delBox.position.set((minX + maxX) * 0.5, y + BUILD.deleteBoxY, (minZ + maxZ) * 0.5);
+    delBox.scale.set(maxX - minX + 1.02, BUILD.deleteBoxH, maxZ - minZ + 1.02);
+    delBox.visible = true;
+  }
+
   function updateGhost() {
+    updateDeleteOutline();
     if (!ghost || !hasCell) { if (ghost) ghost.visible = false; helper.visible = false; return; }
     ghost.visible = !dragging;
     ghost.position.set(cell.x, level() * BUILD.levelRise, cell.z);

@@ -9,7 +9,11 @@
 //   world         { seed, epoch, host } — the inputs every client's local simulation needs
 //   presence/$uid { n, at, s } — who is here and whether they are simulating; onDisconnect
 //                 removes it the instant a tab closes
-//   cursors/$uid  { p } — where they are looking; lossy, 5 Hz, never a source of truth
+//   cursors/$uid  { p } — the POSE packet: where their camera is, which way it looks, the cell
+//                 under their pointer, and a ping counter. Lossy, ~6 Hz, never a source of truth.
+//                 It is ONE string because the deployed rules cap it at 64 characters and forbid
+//                 sibling fields ($other: false), so a head, a pair of hands and a ping marker all
+//                 have to fit inside that one budget — see the packing below.
 //
 // NOT on the wire, ever: items. There can be nine hundred of them moving at 60 Hz, and they are a
 // pure function of the buildings, the clock and the seed — all three of which are already shared.
@@ -24,7 +28,7 @@
 // unpredictable: the dropper's tier roll and the Gamble Press's 20% destroy are drawn from the
 // shared seed (src/net/rng.js) so they are not unpredictable at all once the seed is agreed.
 
-import { ECONOMY, NET } from '../config.js';
+import { ECONOMY, NET, PRESENCE } from '../config.js';
 import { createLocalDriver } from './driver-local.js';
 import { createFirebaseDriver, firebaseConfigured } from './driver-firebase.js';
 import { createRandomSource, randomSeed } from './rng.js';
@@ -105,8 +109,8 @@ export function createSession(options) {
   let inFlightDeposit = 0;
   let lastFlushAt = 0;
 
-  // Cursor packing, reused. Nothing in this module allocates per frame.
-  const cursorLast = { x: 0, y: 0, z: 0, valid: false };
+  // Pose packing, reused. Nothing in this module allocates per frame.
+  const cursorLast = { x: 0, y: 0, z: 0, az: 0, pol: 0, seq: 0, valid: false };
 
   function fire(list, ...args) {
     for (const fn of list.slice()) {
@@ -212,19 +216,35 @@ export function createSession(options) {
     fire(listeners.presence, roster());
   }
 
+  // The pose packet, unpacked:
+  //   0,1,2  camera position           / PRESENCE.posePrecision
+  //   3,4    orbit azimuth and polar   / PRESENCE.anglePrecision
+  //   5,6    the grid cell under their pointer
+  //   7      ping sequence — 0 means "has never pinged"; any CHANGE is a new ping
+  //   8,9    the cell that ping was fired at
+  // Fields 5 onwards are optional: a sender that ran out of the 64-character budget drops the tail
+  // rather than the head, so a pose always survives even if a ping does not.
   function applyCursor(id, value) {
     if (id === uid) return;
     if (!value || typeof value.p !== 'string') { cursorRaw.delete(id); return; }
     const f = value.p.split(',');
     if (f.length < 5) return;
+    const kp = PRESENCE.posePrecision;
+    const ka = PRESENCE.anglePrecision;
     const parsed = {
-      x: Number(f[0]) / NET.precision.position,
-      y: Number(f[1]) / NET.precision.position,
-      z: Number(f[2]) / NET.precision.position,
-      cx: Number(f[3]) | 0,
-      cz: Number(f[4]) | 0,
+      x: Number(f[0]) / kp,
+      y: Number(f[1]) / kp,
+      z: Number(f[2]) / kp,
+      az: Number(f[3]) / ka,
+      pol: Number(f[4]) / ka,
+      cx: f.length > 5 ? Number(f[5]) | 0 : 0,
+      cz: f.length > 6 ? Number(f[6]) | 0 : 0,
+      seq: f.length > 7 ? Number(f[7]) | 0 : 0,
+      px: f.length > 8 ? Number(f[8]) | 0 : 0,
+      pz: f.length > 9 ? Number(f[9]) | 0 : 0,
     };
     if (!Number.isFinite(parsed.x) || !Number.isFinite(parsed.y) || !Number.isFinite(parsed.z)) return;
+    if (!Number.isFinite(parsed.az) || !Number.isFinite(parsed.pol)) return;
     cursorRaw.set(id, parsed);
     fire(listeners.cursor, id, parsed);
   }
@@ -509,18 +529,35 @@ export function createSession(options) {
 
   // --- per-frame --------------------------------------------------------------
 
-  function publishCursor(x, y, z, cx, cz) {
-    if (!driver || !uid || disposed) return;
+  // Metered twice, because this is the only thing on this wire that changes continuously: a rate cap
+  // AND a dead-band on both position and angle. A player who sets the camera down and walks away
+  // sends nothing at all — not a smaller packet, none. A ping bypasses both, because a marker that
+  // arrives 160 ms late is a marker pointing at the wrong moment.
+  function publishPose(x, y, z, az, pol, cx, cz, seq, px, pz) {
+    if (!driver || !uid || disposed) return false;
     const at = now();
-    if (at - lastCursorAt < 1000 / NET.rates.cursorHz) return;
-    const e = NET.rates.cursorEpsilon;
-    if (cursorLast.valid
-      && Math.abs(x - cursorLast.x) < e && Math.abs(y - cursorLast.y) < e && Math.abs(z - cursorLast.z) < e) return;
+    const s = seq | 0;
+    const forced = s !== cursorLast.seq;
+    if (!forced && at - lastCursorAt < 1000 / PRESENCE.poseHz) return false;
+    const e = PRESENCE.posEpsilon;
+    const ea = PRESENCE.angleEpsilon;
+    if (!forced && cursorLast.valid
+      && Math.abs(x - cursorLast.x) < e && Math.abs(y - cursorLast.y) < e && Math.abs(z - cursorLast.z) < e
+      && Math.abs(az - cursorLast.az) < ea && Math.abs(pol - cursorLast.pol) < ea) return false;
     lastCursorAt = at;
-    cursorLast.x = x; cursorLast.y = y; cursorLast.z = z; cursorLast.valid = true;
-    const k = NET.precision.position;
-    const packed = `${Math.round(x * k)},${Math.round(y * k)},${Math.round(z * k)},${cx | 0},${cz | 0}`;
+    cursorLast.x = x; cursorLast.y = y; cursorLast.z = z;
+    cursorLast.az = az; cursorLast.pol = pol; cursorLast.seq = s;
+    cursorLast.valid = true;
+    const kp = PRESENCE.posePrecision;
+    const ka = PRESENCE.anglePrecision;
+    const head = `${Math.round(x * kp)},${Math.round(y * kp)},${Math.round(z * kp)},${Math.round(az * ka)},${Math.round(pol * ka)}`;
+    const tail = `,${cx | 0},${cz | 0},${s},${px | 0},${pz | 0}`;
+    // The rules reject anything over 64 characters and a rejected write is a SILENT loss of the
+    // whole packet — so the tail is dropped rather than gambled with. Position and facing are what
+    // must never be lost; a ping that does not fit is one missed ping.
+    const packed = head.length + tail.length <= 64 ? head + tail : head;
     driver.set(joinPath(P.cursors, uid), { p: packed, at }).catch(() => {});
+    return true;
   }
 
   function update(dt) {
@@ -673,6 +710,14 @@ export function createSession(options) {
       if (!driver) return null;
       return driver.get(joinPath(P.cells, cellClaimKey(x, z, level || 0)));
     },
+    // Test hook, same reasoning as buildIds: presence and the pose packet are the two subtrees a
+    // departing client is supposed to leave empty, and "the survivor's local mirror looks clean" is
+    // a much weaker claim than "the shared tree is clean". This reads the tree itself.
+    async rawTree() {
+      if (!driver) return { presence: null, cursors: null };
+      const [presence, cursors] = await Promise.all([driver.get(P.presence), driver.get(P.cursors)]);
+      return { presence, cursors };
+    },
     get playerCount() { return presenceRaw.size; },
     now,
     roster,
@@ -709,9 +754,27 @@ export function createSession(options) {
     },
 
     presence: {
-      publishCursor,
+      publishPose,
+      // Kept as the old five-argument shape for anything that still speaks it; the pose fields it
+      // cannot supply default to a camera looking straight down, which is harmless and visible.
+      publishCursor: (x, y, z, cx, cz) => publishPose(x, y, z, 0, Math.PI / 2, cx, cz, 0, 0, 0),
+      // Force the next update() to publish, ignoring both the rate cap and the dead-band. Called
+      // when the roster changes: a player who is sitting perfectly still sends NOTHING, by design,
+      // so without this a newcomer would only learn where they are once they happened to move. In a
+      // factory game that can be minutes, and "the other player is invisible until they move" reads
+      // as a broken feature rather than as an idle one.
+      repose() { cursorLast.valid = false; lastCursorAt = 0; },
       onChange(cb) { return on(listeners.presence, cb, (fn) => fn(roster())); },
-      onCursor(cb) { return on(listeners.cursor, cb); },
+      // PRIMED, like every other subscription on this object. The handshake subscribes to the
+      // cursors subtree and fills cursorRaw during join, which happens BEFORE the bridge is in a
+      // position to attach its listener — so an unprimed onCursor silently drops every packet that
+      // was already in the room. The joiner would then never see a player who does not move, while
+      // the host saw the joiner perfectly, which is a maddening asymmetry to debug from the outside.
+      onCursor(cb) {
+        return on(listeners.cursor, cb, (fn) => {
+          for (const [id, value] of cursorRaw) fn(id, value);
+        });
+      },
     },
 
     stats() {

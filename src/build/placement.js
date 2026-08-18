@@ -1,7 +1,8 @@
-// Voidworks — placement UX: ghost preview, validity, rotate, click-drag belt runs, delete with refund.
+// Voidworks — placement UX: ghost preview, validity, rotate, click-drag belt runs, delete with
+// refund, and the undo stack.
 
 import * as THREE from 'three';
-import { BUILD, GRID } from '../config.js';
+import { BUILD, GRID, UNDO } from '../config.js';
 import { createPicker, dirBetween, inBounds } from '../world/grid.js';
 import { getDef, paneColorFor } from '../world/buildings.js';
 import { makeGhost, paintGhost, ghostMaterials } from './ghost.js';
@@ -231,19 +232,167 @@ export function createPlacement(ctx) {
     }
   }
 
+  // --- undo -------------------------------------------------------------------
+  // One entry per PLAYER GESTURE, not per grid cell: a dragged run of twenty belts is one action and
+  // comes back out in one keystroke. Each entry is a list of primitive ops plus the exact money the
+  // gesture moved.
+  //
+  // Money is restored as a DELTA, never as a snapshot. Setting the purse back to what it held before
+  // the click would also erase every dollar the factory earned in between — an idle game where undo
+  // rewinds your income is worse than no undo at all. Subtracting what the gesture itself cost or
+  // refunded restores the gesture exactly and leaves the sim's earnings alone. With no time passing
+  // between a place and its undo, the two are identical, which is what G10 measures.
+  //
+  // CO-OP: undo is refused outright. The two things it must restore are both shared — the bank is a
+  // single balance settled by transactions against a remote node, and the grid is claimed cell by
+  // cell by every client at once. A local rewind of the purse would either desync the bank or hand
+  // this player money that another player's income has already been mixed into, and a cell you
+  // cleared may already have someone else's building standing on it. Scoping to "actions I own and
+  // still hold" fixes the grid half and does nothing for the money half, so it would be an undo that
+  // silently only half works. A clear refusal is the honest version. (UNDO.coop in config.js.)
+
+  const undoStack = [];
+  let recording = null;
+  let lastRefusal = null;
+
+  function coopBlocked() {
+    return !UNDO.coop && !!(world.net && world.net.active);
+  }
+
+  // world.remove(b, {free:true}) deliberately skips economy.refund(), which is also the only thing
+  // that walks the price curve back down. An undo settles money itself, so it has to do that half by
+  // hand or every undone placement would leave the next copy of that building permanently dearer.
+  function countsDown(defId) {
+    const c = economy.counts;
+    const n = c.get(defId) || 0;
+    if (n > 0) c.set(defId, n - 1);
+  }
+
+  function opPlaced(b) {
+    return { k: 'place', uid: b.uid, defId: b.def.id, cx: b.cx, cz: b.cz, rot: b.rot };
+  }
+
+  // Everything needed to stand this piece back up byte for byte, including its filter setting — a
+  // Sorter or Contract Pad that came back pointed at the wrong material would be a grid restored in
+  // shape but not in state.
+  function opRemoved(b) {
+    return { k: 'delete', defId: b.def.id, cx: b.cx, cz: b.cz, rot: b.rot, filter: b.filterTier };
+  }
+
+  function beginAction() {
+    recording = { ops: [], money0: economy.money };
+  }
+
+  function record(op) { if (recording) recording.ops.push(op); }
+
+  function endAction() {
+    const a = recording;
+    recording = null;
+    if (!a || !a.ops.length) return null;
+    a.moneyDelta = economy.money - a.money0;
+    undoStack.push(a);
+    while (undoStack.length > UNDO.depth) undoStack.shift();
+    return a;
+  }
+
+  function restorePiece(op) {
+    const b = world.place(op.defId, op.cx, op.cz, op.rot, { free: true });
+    if (b && op.filter !== undefined) b.filterTier = op.filter;
+    return b;
+  }
+
+  function undo() {
+    if (coopBlocked()) {
+      lastRefusal = 'Undo is off in co-op: the bank and the grid are shared, so one client cannot rewind them.';
+      return { ok: false, reason: lastRefusal };
+    }
+    const a = undoStack.pop();
+    if (!a) {
+      lastRefusal = 'Nothing to undo.';
+      return { ok: false, reason: lastRefusal };
+    }
+    const ops = a.ops;
+
+    // Phase 0 — everything this gesture BUILT must still be standing, and still be the same piece.
+    // Anything else (a later swap, a delete, a network mirror) means the world has moved on and this
+    // entry no longer describes a reversible step.
+    for (let i = 0; i < ops.length; i += 1) {
+      const op = ops[i];
+      if (op.k !== 'place') continue;
+      const b = world.buildings.get(op.uid);
+      if (!b || b.def.id !== op.defId) {
+        undoStack.push(a);
+        lastRefusal = 'That build has already been changed.';
+        return { ok: false, reason: lastRefusal };
+      }
+    }
+
+    // Phase 1 — take them back out, free: money is settled once, at the end, by the delta.
+    const pulled = [];
+    for (let i = ops.length - 1; i >= 0; i -= 1) {
+      const op = ops[i];
+      if (op.k !== 'place') continue;
+      const b = world.buildings.get(op.uid);
+      const keep = { k: 'delete', defId: op.defId, cx: op.cx, cz: op.cz, rot: op.rot, filter: b.filterTier };
+      world.remove(b, { free: true });
+      countsDown(op.defId);
+      pulled.push(keep);
+    }
+
+    // Phase 2 — can everything this gesture DESTROYED go back exactly where it was? Asked only after
+    // phase 1, because for a swap-in-place the ground is occupied by the new piece until it is gone.
+    let ok = true;
+    for (let i = 0; i < ops.length && ok; i += 1) {
+      const op = ops[i];
+      if (op.k !== 'delete') continue;
+      const d = getDef(op.defId);
+      if (!d || !grid.fits(d, op.cx, op.cz, op.rot)) ok = false;
+    }
+    if (!ok) {
+      // Put back exactly what phase 1 took out. A refused undo must leave no trace, for the same
+      // reason a failed swap must not: a half-applied rewind is a way to lose buildings for free.
+      for (let i = pulled.length - 1; i >= 0; i -= 1) restorePiece(pulled[i]);
+      undoStack.push(a);
+      lastRefusal = 'Something else is standing where that used to be.';
+      return { ok: false, reason: lastRefusal };
+    }
+
+    for (let i = ops.length - 1; i >= 0; i -= 1) {
+      const op = ops[i];
+      if (op.k === 'delete') restorePiece(op);
+    }
+
+    economy.money -= a.moneyDelta;
+    world.flow.markDirty();
+    lastRefusal = null;
+    hideRun();
+    refreshValidity();
+    updateGhost();
+    return { ok: true, ops: ops.length, money: -a.moneyDelta };
+  }
+
   function commitRun() {
     if (!runCells.length) return 0;
     let n = 0;
     let last = null;
+    // The whole drag is recorded as ONE action, so twenty tiles undo in one keystroke — the gesture
+    // the player made was "lay this run", not "place a belt" twenty times.
+    beginAction();
     for (const step of runCells) {
       const occupied = grid.at(step.cx, step.cz, level());
       if (occupied) {
         if (alreadyIs(occupied, getDef(step.id), step.rot)) continue;
-        if (world.replace(getDef(step.id), step.cx, step.cz, step.rot)) { n += 1; last = step; }
+        // A swap is a delete and a place; recorded as both so the undo puts the old piece back with
+        // its own rotation rather than merely clearing the cell.
+        const before = opRemoved(occupied);
+        const swapped = world.replace(getDef(step.id), step.cx, step.cz, step.rot);
+        if (swapped) { record(before); record(opPlaced(swapped)); n += 1; last = step; }
         continue;
       }
-      if (world.place(step.id, step.cx, step.cz, step.rot)) { n += 1; last = step; }
+      const b = world.place(step.id, step.cx, step.cz, step.rot);
+      if (b) { record(opPlaced(b)); n += 1; last = step; }
     }
+    endAction();
     // One run is one gesture: a single confirmation, not one per tile.
     if (n) sfx('place', last.cx, last.cz);
     else sfx('denied', cell.x, cell.z);
@@ -254,7 +403,21 @@ export function createPlacement(ctx) {
   function placeHere() {
     if (!def || !hasCell) return null;
     // One click, one result: onto empty ground it places, onto a belt of the same family it swaps.
-    const b = world.place(def, cell.x, cell.z, rot) || world.replace(def, cell.x, cell.z, rot);
+    // The swap is also how rotate-in-place happens — same def, different rot — so recording the
+    // outgoing piece here is what makes a rotation undoable back to its original facing.
+    const standing = grid.at(cell.x, cell.z, level());
+    beginAction();
+    let b = world.place(def, cell.x, cell.z, rot);
+    if (b) record(opPlaced(b));
+    else {
+      const before = standing ? opRemoved(standing) : null;
+      b = world.replace(def, cell.x, cell.z, rot);
+      if (b) {
+        if (before) record(before);
+        record(opPlaced(b));
+      }
+    }
+    endAction();
     sfx(b ? 'place' : 'denied', cell.x, cell.z);
     return b;
   }
@@ -274,7 +437,13 @@ export function createPlacement(ctx) {
   function deleteHere() {
     if (!hasCell) return false;
     const target = deleteTarget();
+    // Snapshotted BEFORE the removal: afterwards the building has been unhooked from the grid and
+    // its rotation and filter setting are only still readable off the object by luck.
+    const before = target ? opRemoved(target) : null;
+    beginAction();
     const gone = target ? world.remove(target) : false;
+    if (gone && before) record(before);
+    endAction();
     sfx(gone ? 'remove' : 'denied', cell.x, cell.z);
     return gone;
   }
@@ -299,11 +468,14 @@ export function createPlacement(ctx) {
   if (orbit && orbit.setDragBlocker) orbit.setDragBlocker((e) => active() && (!e || e.button === 0 || e.button === 2));
 
   on(window, 'pointermove', (e) => {
-    if (!active()) return;
     ptr.x = e.clientX;
     ptr.y = e.clientY;
+    // The hovered cell is tracked even with no build tool selected: F retargets whatever machine is
+    // under the pointer, and requiring a tool in hand to change a sorter's material would be absurd.
+    // One ray-plane intersection per pointer move — the same one the ghost already pays for.
     const hit = pickCell(e.clientX, e.clientY, cell, level());
     hasCell = !!hit;
+    if (!active()) return;
     refreshValidity();
     if (dragging && dragFrom && def && def.family === 'belt') showRun(planPath(dragFrom, cell));
     updateGhost();
@@ -325,7 +497,7 @@ export function createPlacement(ctx) {
     if (e.button !== 0) return;
     e.stopPropagation();
     if (deleteMode) { deleteHere(); return; }
-    if (BUILD.dragLay && def.family === 'belt') {
+    if (BUILD.dragLay && def.family === 'belt' && !def.noDrag) {
       dragging = true;
       dragFrom = { x: cell.x, z: cell.z };
       showRun([[cell.x, cell.z]]);
@@ -351,7 +523,35 @@ export function createPlacement(ctx) {
 
   on(dom, 'contextmenu', (e) => { if (active()) e.preventDefault(); });
 
+  // Typing a name into the co-op form must never build, rotate or rewind the factory.
+  function typing(e) {
+    const t = e.target;
+    if (!t) return false;
+    const tag = t.tagName ? t.tagName.toLowerCase() : '';
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || t.isContentEditable === true;
+  }
+
   on(window, 'keydown', (e) => {
+    if (typing(e)) return;
+    // Cmd+Z on a Mac, Ctrl+Z everywhere else. Shift is excluded so a future redo can claim it.
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      const r = undo();
+      sfx(r.ok ? 'remove' : 'denied', cell.x, cell.z);
+      if (!r.ok && world.onUndoRefused) world.onUndoRefused(r.reason);
+      return;
+    }
+    // F: retarget the Sorter or Contract Pad under the pointer. Shift+F walks back down the list.
+    // The readout belongs to the HUD/buildbar, not here — this is only the input.
+    if (e.key === 'f' || e.key === 'F') {
+      const target = hasCell ? deleteTarget() : null;
+      if (target && target.def.filter) {
+        const t = world.flow.cycleFilter(target, e.shiftKey ? -1 : 1);
+        sfx('rotate', target.cx, target.cz);
+        if (world.onFilterChanged) world.onFilterChanged(target, t);
+      } else sfx('denied', cell.x, cell.z);
+      return;
+    }
     if (e.key === 'r' || e.key === 'R') { rotate(e.shiftKey ? -1 : 1); return; }
     if (e.key === 'Escape') { select(null); return; }
     if (e.key === 'x' || e.key === 'Delete') select(deleteMode ? null : 'delete');
@@ -367,6 +567,16 @@ export function createPlacement(ctx) {
     get valid() { return valid; },
     get cell() { return cell; },
     paneColorFor,
+    // The machine under the pointer, or null. The buildbar/HUD need it to draw the filter readout.
+    hovered: () => (hasCell ? deleteTarget() : null),
+    cycleFilter: (b, dir) => world.flow.cycleFilter(b, dir),
+    undo,
+    canUndo: () => undoStack.length > 0 && !coopBlocked(),
+    get undoDepth() { return undoStack.length; },
+    get undoRefusal() { return lastRefusal; },
+    // Exposed so a save restore or a prestige reset can drop a stack that no longer describes a
+    // world that exists. Undoing into a wiped board would resurrect buildings from a past life.
+    clearUndo() { undoStack.length = 0; lastRefusal = null; },
     update() {
       if (!active()) { if (ghost) ghost.visible = false; helper.visible = false; hideRun(); return; }
       refreshValidity();

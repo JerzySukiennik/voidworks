@@ -1,7 +1,8 @@
 // Voidworks — the buildable catalogue: footprints, costs, lane geometry, behaviour and primitive part lists.
 
 import * as THREE from 'three';
-import { GRID, FLOW, PALETTE, PANES } from '../config.js';
+import { GRID, FLOW, PALETTE, PANES, SORTER } from '../config.js';
+import { tierColor } from './items.js';
 
 const BY = GRID.beltY;
 const RISE = FLOW.rampRise;
@@ -37,6 +38,19 @@ export const MATERIALS = {
   warn: mat(PALETTE.warn, { roughness: 0.42, metalness: 0.14, emissive: new THREE.Color(PALETTE.warn), emissiveIntensity: 0.2 }),
   rare: mat(PALETTE.rare, { roughness: 0.34, metalness: 0.2, emissive: new THREE.Color(PALETTE.rare), emissiveIntensity: 0.34 }),
   gold: mat(PALETTE.gold, { roughness: 0.3, metalness: 0.6, emissive: new THREE.Color(PALETTE.gold), emissiveIntensity: 0.18 }),
+  // The sorter's decision pane. One SHARED material, deliberately: with primitives every sorter in
+  // the factory draws from the same instanced batch, so it cannot carry a per-building tint. The
+  // authored glb ships its own `pane` slot for that, and `filterColorFor()` below is the number the
+  // renderer will feed it. Until then this stays neutral and the filtered tier is read off the UI.
+  sortPane: mat(SORTER.paneColor, {
+    transparent: true,
+    opacity: SORTER.paneOpacity,
+    depthWrite: false,
+    roughness: 0.3,
+    metalness: 0,
+    emissive: new THREE.Color(SORTER.paneColor),
+    emissiveIntensity: 0.3,
+  }),
 };
 
 function part(g, m, px, py, pz, sx, sy, sz, ry, rx, rz) {
@@ -295,6 +309,29 @@ export const BUILDINGS = [
       part('cyl', 'warn', 0, BY + 0.07, 0, 0.24, 0.14, 0.24),
     ],
   }),
+  // A splitter answers "where next?" with "somewhere else this time". A sorter answers it with
+  // "what are you?" — which is the entire difference between a longer belt and a layout puzzle.
+  // Non-matching material runs STRAIGHT through; the filtered tier turns off to the left arm.
+  // `noDrag` because a dragged run of sorters is never what anyone meant by dragging.
+  def({
+    id: 'sorter', name: 'Sorter', family: 'belt', cost: 300, unlock: 1,
+    desc: 'Reads every item. The material it is set to turns left; everything else carries straight on. Cycle the material with F.',
+    sort: true, filter: true, noDrag: true,
+    lanes: [
+      straightLane(1, 0, 0, { route: 2 }),
+      lane(arcPts(-0.5, -0.5, 0.5, H, 0, 0), 0, 1, [0, 0], [0, 0], { route: 1 }),
+    ],
+    parts: [
+      ...beltParts(1),
+      part('box', 'steelDark', 0.14, BY - 0.15, 0, 0.6, 0.19, 1.0),
+      // Two short posts and a low pane across the belt: the item is READ here, not changed, so the
+      // silhouette deliberately sits below the upgrader gates rather than competing with them.
+      part('box', 'steelDark', -0.3, BY + 0.24, -0.45, 0.14, 0.5, 0.16),
+      part('box', 'steelDark', -0.3, BY + 0.24, 0.45, 0.14, 0.5, 0.16),
+      part('box', 'sortPane', -0.3, BY + 0.3, 0, 0.05, 0.34, 0.88),
+      part('cyl', 'warn', 0.24, BY + 0.07, -0.24, 0.2, 0.14, 0.2),
+    ],
+  }),
   def({
     id: 'belt_ramp_up', name: 'Ramp Up', family: 'belt', cost: 90, unlock: 1,
     levels: [0, 1],
@@ -356,6 +393,27 @@ export const BUILDINGS = [
       part('box', 'accent', 0, BY - 0.03, 0, 0.88, 0.09, 0.88),
     ],
   }),
+  // The demand side of the sorter. A plain pad is indifferent to what lands on it; this one is not,
+  // and the penalty is what makes it a decision rather than a free upgrade — dump a mixed line onto
+  // it and most of what you sell is worth a third of its value. The exact numbers, and the proof
+  // that sorting into it beats a plain pad, live in SELLPAD in config.js.
+  def({
+    id: 'sellpad_tier', name: 'Contract Pad', family: 'sell', cost: 2500, unlock: 1,
+    rotatable: false,
+    tierPad: true, filter: true,
+    desc: 'Pays 2.2x for the one material it is set to and only 0.35x for everything else. Feed it from a sorter. Deliveries here are what fill orders. Cycle the material with F.',
+    lanes: sinkLanes([[0, 0]], 0, 0, 0),
+    parts: [
+      part('box', 'accentDeep', 0, BY - 0.17, 0, 1.0, 0.22, 1.0),
+      part('box', 'gold', 0, BY - 0.03, 0, 0.88, 0.09, 0.88),
+      // A ring of four studs: the plain pad is a flat green square, so the tier pad has to differ in
+      // silhouette as well as colour or the two are one object at a glance from above.
+      part('cyl', 'steelDark', -0.38, BY + 0.02, -0.38, 0.14, 0.16, 0.14),
+      part('cyl', 'steelDark', 0.38, BY + 0.02, -0.38, 0.14, 0.16, 0.14),
+      part('cyl', 'steelDark', -0.38, BY + 0.02, 0.38, 0.14, 0.16, 0.14),
+      part('cyl', 'steelDark', 0.38, BY + 0.02, 0.38, 0.14, 0.16, 0.14),
+    ],
+  }),
   def({
     id: 'buffer', name: 'Buffer Vault', family: 'store', cost: 1200, unlock: 1,
     // 16 slots, not 90: at a starting cap of 100 a 90-slot vault swallowed almost the whole factory
@@ -412,6 +470,12 @@ const MODEL_FOR = {
   dropper_ore: 'dropper-mk2',
   dropper_deep: 'dropper-mk3',
   dropper_void: 'dropper-void',
+  // world.js loads only what assets/models/manifest.json lists, so these two lines are inert until
+  // the modeller adds the names there, and then pick the meshes up with no further change. Neither
+  // is pointed at an existing mesh as a stand-in: reusing sellpad.glb for the Contract Pad would
+  // make the two pads pixel-identical, which is worse than the primitives.
+  sorter: 'sorter',
+  sellpad_tier: 'sellpad-tier',
 };
 
 export const ITEM_MODELS = [
@@ -509,6 +573,15 @@ export function getDef(id) { return BUILDING_BY_ID.get(id) || null; }
 export function isBeltLike(d) {
   return !!d && (d.family === 'belt' || d.family === 'upgrader');
 }
+
+// Does this definition carry a per-building "which material" setting? Sorter and Contract Pad do;
+// nothing else does. One predicate, so the UI never has to enumerate ids.
+export function hasFilter(d) { return !!d && !!d.filter; }
+
+// The colour the authored glb's `pane` slot should be tinted to for a given filtered tier — and the
+// swatch the UI should print next to the building. Derived from the item table so it can never drift
+// from the material it is naming.
+export function filterColorFor(tierIndex) { return tierColor(tierIndex); }
 
 export function buildGhost(d, material) {
   const g = new THREE.Group();

@@ -1,14 +1,16 @@
 // Voidworks — world assembly: owns the building graph, the flow sim, the economy and the starter factory.
 
 import * as THREE from 'three';
-import { GRID, FLOW, ECONOMY, AUDIO } from '../config.js';
+import { GRID, FLOW, ECONOMY, AUDIO, FX } from '../config.js';
 import { createGrid, dirBetween, turnLeft, turnRight } from './grid.js';
 import { BUILDINGS, ITEM_MODELS, GEOMETRIES, MATERIALS, PANE_MATERIALS, LIGHT_MATERIALS, getDef, paneColorFor, isBeltLike } from './buildings.js';
+import { TIERS } from './items.js';
 import { createFlow } from './belt.js';
 import { createItemInstancer, createPartInstancer, createLabelPool } from '../render/instancing.js';
 import { createEconomy } from '../sim/economy.js';
 import { createTicker } from '../sim/tick.js';
 import { createPlacement } from '../build/placement.js';
+import { createOrders } from '../sim/orders.js';
 
 const _p = new THREE.Vector3();
 const _s = new THREE.Vector3();
@@ -37,12 +39,71 @@ async function loadModels(wanted) {
     await Promise.all(found.map(async (id) => {
       try {
         const gltf = await loader.loadAsync(`assets/models/${id}.glb`);
-        gltf.scene.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+        // Only the pieces cargo actually rides get a running surface. A dropper's rubber trim is
+        // the same material NAME but a different material instance per glb, so this cannot leak.
+        const runs = id.startsWith('belt') || id.startsWith('upgrader');
+        gltf.scene.traverse((o) => {
+          if (!o.isMesh) return;
+          o.castShadow = true;
+          o.receiveShadow = true;
+          if (runs) patchBeltMaterial(o.material);
+        });
         cache.set(id, gltf.scene);
       } catch { /* keep the primitive */ }
     }));
   } catch { /* loader unavailable, keep primitives */ }
   return cache;
+}
+
+// --- the belts actually run ---------------------------------------------------
+// The single hardest constraint on "make it look alive" here is that the factory already costs
+// ~2000 draw calls from 1146 meshes (work/PERF-PROTOCOL.md), so a running belt may not be a new
+// object, a new material or a per-belt update. It is one shader patch on the SHARED glb band
+// material plus four uniform objects that every patched material holds BY REFERENCE — so a
+// thousand belts scroll for the price of one float write per frame, and zero draw calls.
+const beltTime = { value: 0 };
+const beltGain = { value: FX.enabled ? FX.belt.gain : 0 };
+const beltFreq = { value: FX.belt.frequency };
+const beltSpeed = { value: FX.belt.speed };
+const beltSharp = { value: FX.belt.sharpness };
+
+const BAND_GLSL = `
+	float vwPhase = (vwLocal.x * vwFreq - vwTime * vwSpeed) * 6.2831853;
+	float vwBand = pow(0.5 + 0.5 * sin(vwPhase), vwSharp);
+	gl_FragColor.rgb += vwBand * vwGain;
+`;
+
+function patchBeltMaterial(m) {
+  if (!m || !m.name || m.userData.vwScroll) return;
+  if (FX.belt.materials.indexOf(m.name) < 0) return;
+  m.userData.vwScroll = true;
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.vwTime = beltTime;
+    shader.uniforms.vwGain = beltGain;
+    shader.uniforms.vwFreq = beltFreq;
+    shader.uniforms.vwSpeed = beltSpeed;
+    shader.uniforms.vwSharp = beltSharp;
+    // The stripe travels along the mesh's LOCAL +X, which the model contract fixes as "forward",
+    // so one patch is correct for every rotation of every belt without any per-instance data.
+    shader.vertexShader = `varying vec3 vwLocal;\n${shader.vertexShader}`.replace(
+      '#include <begin_vertex>',
+      '#include <begin_vertex>\n\tvwLocal = position;',
+    );
+    let frag = `uniform float vwTime;\nuniform float vwGain;\nuniform float vwFreq;\nuniform float vwSpeed;\nuniform float vwSharp;\nvarying vec3 vwLocal;\n${shader.fragmentShader}`;
+    // Added after tone mapping and the transfer function on purpose: the band is lin 0.031, so a
+    // change large enough to READ in the display image is tiny in scene-linear and would be eaten.
+    if (frag.indexOf('#include <dithering_fragment>') >= 0) {
+      frag = frag.replace('#include <dithering_fragment>', `${BAND_GLSL}\n\t#include <dithering_fragment>`);
+    } else {
+      // three moved the chunk: append rather than silently render an unpatched belt.
+      const cut = frag.lastIndexOf('}');
+      frag = `${frag.slice(0, cut)}${BAND_GLSL}\n}`;
+    }
+    shader.fragmentShader = frag;
+  };
+  // three's default cache key is onBeforeCompile.toString(), which already separates patched from
+  // unpatched materials, so the patched belts get their own program and nothing else is disturbed.
+  m.needsUpdate = true;
 }
 
 // One mesh + one material per item tier, lifted straight out of the glb for InstancedMesh.
@@ -73,12 +134,30 @@ export async function createWorld(view, orbit) {
 
   const grid = createGrid();
   const economy = createEconomy();
+  const orders = createOrders({ economy });
 
   const wanted = new Set(ITEM_MODELS);
   for (const d of BUILDINGS) if (d.model) wanted.add(d.model);
   const models = await loadModels(wanted);
 
   const instancer = createItemInstancer(itemGroup, ECONOMY.capacityMax, itemModelTable(models));
+
+  // ITEMS.tiers[].color had drifted well away from what the glb materials actually are — slag and
+  // iron in particular were listed several stops lighter than they render, which is how iron ended
+  // up reading as a missing asset while the config insisted it was near-white. The meshes are what
+  // the player sees, so the meshes win: the tier table is written back from the instancer's own
+  // materials at load. The config literals carry the same values, so this is a guard against future
+  // drift rather than a hidden override, and a tier with no glb keeps its configured colour.
+  function syncTierColours() {
+    if (!FX.syncTierColours) return;
+    for (let i = 0; i < TIERS.length; i += 1) {
+      const mesh = instancer.meshes[i];
+      const tune = mesh && mesh.material && mesh.material.userData && mesh.material.userData.vwLit;
+      if (!tune) continue;
+      TIERS[i].color = `#${tune.color.getHexString()}`;
+    }
+  }
+  syncTierColours();
   const partInst = createPartInstancer(partsGroup, GEOMETRIES, MATERIALS, view.markTransparent);
   const labels = createLabelPool(fxGroup, FLOW.labelPool, view.camera);
   // The renderer keeps see-through objects out of its occlusion g-buffer; opt ours in explicitly.
@@ -96,10 +175,19 @@ export async function createWorld(view, orbit) {
     onSell,
   });
 
+  flow.setDeliverHook((tier, n) => orders.deliver(tier, n));
+
   const lightGeo = new THREE.BoxGeometry(1, 1, 1);
 
   let uid = 0;
   let partsDirty = true;
+  // True while any primitive-parts building is mid-reaction, i.e. while the part instancer has to be
+  // rebuilt on this frame as well as on build changes. An idle factory leaves it false and the whole
+  // FX system costs one loop over the building map.
+  let fxLoud = false;
+  // The FX master switch. Declared here rather than beside setFxEnabled() because rebuildParts()
+  // reads it and runs during construction, before that point in the file.
+  let fxOn = FX.enabled;
   let saveTimer = 0;
   let time = 0;
   let benchBuilt = false;
@@ -140,8 +228,33 @@ export async function createWorld(view, orbit) {
     sfx('dropper', b.cx, GRID.beltY + 0.5, b.cz, tierIdx);
   }
 
+  // --- the sell pad reacts in proportion to what landed on it ------------------
+  // This fires many times a second at 200+ items, so it must not allocate and must not queue: it
+  // writes two numbers on the building the sim already handed us. Intensity is a LOG map of value,
+  // because sale values span 10 (slag) to tens of thousands (an upgraded singularite) and a linear
+  // map would make everything below the top tier a flat nothing. Repeat sales coalesce naturally —
+  // the envelope is simply re-armed, and the louder of the two amplitudes wins for what is left of
+  // the first one's decay, so a slag landing can never stamp on a singularite's flare.
+  const SELL_LO = Math.log(Math.max(1, FX.sell.lo));
+  const SELL_SPAN = Math.log(Math.max(FX.sell.lo + 1, FX.sell.hi)) - SELL_LO;
+
+  function sellIntensity(value) {
+    const u = (Math.log(Math.max(1, value)) - SELL_LO) / SELL_SPAN;
+    return FX.sell.base + FX.sell.gain * Math.max(0, Math.min(1, u));
+  }
+
   function onSell(b, value, tierIdx) {
     sfx(economy.isBigSale(value) ? 'sell-big' : 'sell', b.cx + 0.5, GRID.beltY, b.cz + 0.5, tierIdx);
+    const amp = sellIntensity(value);
+    // The pad's envelope is `fxSell`, owned here, NOT the sim's `flash`. It has to be: the sim
+    // re-arms flash to 1 immediately before calling this, so by the time we are asked "is a louder
+    // flare still running?" the evidence has already been overwritten. `fxAmp * fxSell` is what the
+    // pad is displaying at this instant, read before re-arming — so a slag landing during a
+    // singularite's flare is absorbed by it, and the same slag landing on a pad at rest gets its
+    // own (small) reaction instead of being silently swallowed.
+    if (amp >= b.fxAmp * b.fxSell) b.fxAmp = amp;
+    b.fxSell = 1;
+    fxLoud = true;
   }
 
   // --- labels: pooled, coalesced, and only for gains worth reading -------------
@@ -198,6 +311,12 @@ export async function createWorld(view, orbit) {
     const b = {
       uid: ++uid, def, cx, cz, rot: r, lanes: [], flash: 0, timer: 0,
       store: null, outLane: null, model: null, light: null, stalled: false,
+      // --- scene life. `flash` is the envelope: the sim spikes it to 1 (or 0.5) on every event and
+      // animateFx is the only thing that decays it. `fxAmp` scales how loud that event is allowed
+      // to be — the sell pad sets it from the item's value, everything else leaves it at 1.
+      // `fxMoved` remembers whether this building's transform is currently displaced, so an idle
+      // factory writes no transforms at all, and so a reaction can be undone exactly once.
+      fxAmp: 1, fxSell: 0, fxMoved: false, modelY0: def.modelY || 0,
     };
     if (def.model && models.has(def.model)) {
       const m = models.get(def.model).clone(true);
@@ -311,6 +430,7 @@ export async function createWorld(view, orbit) {
     grid.clear();
     flow.clear();
     economy.reset();
+    orders.reset();
     benchBuilt = false;
     partsDirty = true;
     boundsDirty = true;
@@ -381,6 +501,35 @@ export async function createWorld(view, orbit) {
 
   // --- parts instancing -------------------------------------------------------
 
+  // The sell pad, the furnace and the vault have no glb of their own: they are primitive parts in
+  // the shared instancer. That is exactly why they can react for free — a reaction is a different
+  // matrix and a different per-instance tint in a pool that was being submitted anyway. `_fx` is a
+  // module-level scratch object so reading a building's reaction allocates nothing.
+  const _fx = { s: 1, dy: 0, glow: 1 };
+  const FX_IDLE = { s: 1, dy: 0, glow: 1 };
+
+  function partFx(b) {
+    if (!fxOn) return FX_IDLE;
+    if (b.def.family === 'sell') {
+      if (b.fxSell <= 0) return FX_IDLE;
+      const a = b.fxAmp * b.fxSell;
+      _fx.s = 1 + FX.sell.swell * a;
+      _fx.dy = -FX.sell.dip * a;
+      // Pushed past 1 deliberately: above roughly 2.6x the pad's green clears the bloom threshold,
+      // which is the difference between "a pad lit up" and "something valuable just landed".
+      _fx.glow = 1 + FX.sell.glow * a;
+      return _fx;
+    }
+    const e = b.flash;
+    if (e > 0 && b.def.fuse) {
+      _fx.s = 1 + FX.furnace.swell * e;
+      _fx.dy = -FX.furnace.dip * e;
+      _fx.glow = 1 + FX.furnace.glow * e;
+      return _fx;
+    }
+    return FX_IDLE;
+  }
+
   function rebuildParts() {
     partInst.begin();
     for (const b of buildings.values()) {
@@ -390,15 +539,19 @@ export async function createWorld(view, orbit) {
       _qy.setFromAxisAngle(_axis, ang);
       const cos = Math.cos(ang);
       const sin = Math.sin(ang);
+      const fx = partFx(b);
+      const k = fx.s;
       for (const p of list) {
         const lx = p.p[0];
         const lz = p.p[2];
-        _p.set(b.cx + lx * cos + lz * sin, p.p[1], b.cz - lx * sin + lz * cos);
+        // Scaled about the building's own base centre, so a reacting pad grows off the deck it
+        // sits on rather than sinking through where a floor would be if this game had one.
+        _p.set(b.cx + (lx * cos + lz * sin) * k, p.p[1] * k + fx.dy, b.cz + (-lx * sin + lz * cos) * k);
         _e.set(p.r[0], p.r[1], p.r[2]);
         _q.setFromEuler(_e).premultiply(_qy);
-        _s.set(p.s[0], p.s[1], p.s[2]);
+        _s.set(p.s[0] * k, p.s[1] * k, p.s[2] * k);
         _m.compose(_p, _q, _s);
-        partInst.push(p.g, p.m, _m);
+        partInst.push(p.g, p.m, _m, fx.glow);
       }
     }
     partInst.end();
@@ -556,29 +709,130 @@ export async function createWorld(view, orbit) {
 
   function step(dt) {
     flow.update(dt);
-    economy.tick(dt);
+    economy.tick(dt, flow.count >= economy.capacity);
+    orders.update(dt);
   }
 
   const ticker = createTicker(1 / ECONOMY.tickRate, step);
 
+  // --- scene life: one pass, no objects, no draw calls -------------------------
+  // Every machine in the game reacts through an envelope that decays here and NOWHERE else, so
+  // there is exactly one place where "how long does a reaction last" is decided. For most machines
+  // that envelope is the sim's own `b.flash`, which it re-arms on every event (drop, upgrade, fuse,
+  // filter change). The sell pad is the exception and owns `b.fxSell` instead — see onSell for why
+  // sharing `flash` made value-scaling impossible.
+  //
+  // What a reaction is allowed to be, in order of preference and cost:
+  //   1. a shared uniform            — the belt band, one write for the whole factory
+  //   2. a shared material property  — the upgrader panes, one write per definition
+  //   3. an instance attribute       — the sell pad and furnace, inside a pool already submitted
+  //   4. a transform on a mesh that already exists — droppers and upgrader bodies
+  // None of the four adds an object or a draw call, which matters because the measured wall in
+  // this game is draw-call submission, not geometry (work/PERF-PROTOCOL.md).
+
+  function decayFor(def) {
+    if (def.family === 'dropper') return FX.dropper.decay;
+    if (def.family === 'upgrader') return FX.upgrader.decay;
+    if (def.family === 'sell') return FX.sell.decay;
+    if (def.fuse) return FX.furnace.decay;
+    return FX.upgrader.decay;
+  }
+
+  // Puts one building's mesh back exactly where the build system placed it. Called when its
+  // envelope reaches zero and when the whole FX system is switched off, so a disabled or idle
+  // factory is bit-identical to the pre-FX one rather than merely close to it.
+  function restModel(b) {
+    if (!b.model) return;
+    b.model.position.y = b.modelY0;
+    b.model.scale.set(1, 1, 1);
+    b.fxMoved = false;
+  }
+
+  function animateMachine(b, e) {
+    const m = b.model;
+    if (!m) return;
+    const fam = b.def.family;
+    if (fam === 'dropper') {
+      // A stamp press: it punches down on the frame it emits and springs back out of it.
+      const q = FX.dropper.squash * e;
+      m.position.y = b.modelY0 - FX.dropper.dip * e;
+      m.scale.set(1 + q * 0.5, 1 - q, 1 + q * 0.5);
+      b.fxMoved = true;
+    } else if (fam === 'upgrader') {
+      // The pane already flares; this makes the body flex with it so a fired gate MOVES as well as
+      // glows, which is what reads at the distance the camera actually sits at.
+      const k = 1 + FX.upgrader.swell * e;
+      m.scale.set(k, k, k);
+      b.fxMoved = true;
+    }
+  }
+
   function animateFx(dt) {
+    beltTime.value += dt;
+    // Kept bounded: a session measured in hours would otherwise walk the phase into float ranges
+    // where the stripe visibly quantises. The period is 1/frequency world units of travel.
+    if (beltTime.value > 4096) beltTime.value -= 4096;
+
+    fxLoud = false;
+    for (const b of buildings.values()) {
+      if (b.fxSell > 0) {
+        b.fxSell -= dt * FX.sell.decay;
+        // One extra rebuild AT zero so the pad lands back on its exact resting matrix and tint
+        // rather than a frame short of it.
+        if (b.fxSell <= 0) { b.fxSell = 0; b.fxAmp = 1; }
+        fxLoud = true;
+      }
+      if (b.flash > 0) {
+        b.flash -= dt * decayFor(b.def);
+        if (b.flash <= 0) {
+          b.flash = 0;
+          b.fxAmp = 1;
+          if (b.fxMoved) restModel(b);
+          // One last rebuild so the pad lands back at its exact resting matrix and tint.
+          if (!b.model) fxLoud = true;
+          continue;
+        }
+        if (fxOn) {
+          animateMachine(b, b.flash);
+          if (!b.model) fxLoud = true;
+        }
+      }
+    }
+
     for (const [id, list] of paneOwners) {
       const m = paneMats.get(id);
       if (!m) continue;
       let peak = 0;
       for (let i = 0; i < list.length; i += 1) {
-        const b = list[i];
-        if (b.flash > 0) { b.flash = Math.max(0, b.flash - dt * 3.4); if (b.flash > peak) peak = b.flash; }
+        const f = list[i].flash;
+        if (f > peak) peak = f;
       }
-      m.emissiveIntensity = 0.55 + peak * 2.1;
-      m.opacity = 0.5 + peak * 0.28;
+      if (!fxOn) peak = 0;
+      m.emissiveIntensity = FX.upgrader.emissiveBase + peak * FX.upgrader.emissiveGain;
+      m.opacity = FX.upgrader.opacityBase + peak * FX.upgrader.opacityGain;
     }
+
     for (let i = 0; i < lightOwners.length; i += 1) {
       const b = lightOwners[i];
       const want = b.stalled ? LIGHT_MATERIALS.stalled : LIGHT_MATERIALS.ok;
       if (b.light.material !== want) b.light.material = want;
     }
     labels.update(dt, FLOW.labelLife, FLOW.labelRise);
+  }
+
+  // --- the master switch -------------------------------------------------------
+  // Exists so the A/B in work/tools/fxtest.mjs happens inside ONE page load against ONE scene,
+  // rather than across two launches of a machine whose GPU clock drifts by 3x (PERF-PROTOCOL rule 3).
+  function setFxEnabled(on) {
+    fxOn = !!on;
+    beltGain.value = fxOn ? FX.belt.gain : 0;
+    instancer.setEnabled(fxOn);
+    for (const b of buildings.values()) {
+      if (b.fxMoved) restModel(b);
+      if (!fxOn) { b.fxSell = 0; b.fxAmp = 1; }
+    }
+    partsDirty = true;
+    return fxOn;
   }
 
   const api = {
@@ -613,6 +867,14 @@ export async function createWorld(view, orbit) {
     layRun,
     clearAll,
     priceOf: (d) => economy.priceOf(typeof d === 'string' ? getDef(d) : d),
+    orders,
+    prestige() {
+      const res = economy.prestige();
+      if (!res) return null;
+      clearAll();
+      economy.save(Array.from(buildings.values()));
+      return res;
+    },
     capacityPrice: () => economy.capacityPrice(),
     buyCapacity: () => economy.buyCapacity(),
 
@@ -624,12 +886,27 @@ export async function createWorld(view, orbit) {
         economy.wipe();
         clearAll();
         buildStarter();
+        placement.clearUndo?.();
       }
       return true;
     },
 
     buildShowcase,
     get isShowcase() { return showcase; },
+
+    // Scene life, exposed for the harness: setEnabled(false) restores the pre-FX look in place.
+    fx: {
+      setEnabled: setFxEnabled,
+      get enabled() { return fxOn; },
+      get loud() { return fxLoud; },
+      sellIntensity,
+      beltPhase: () => beltTime.value,
+      // The very function reference the flow sim is handed as its onSell callback — not a copy and
+      // not a test-only path. work/tools/fxtest.mjs fires the pad through this with an explicit
+      // value so the reaction can be measured at a chosen point on the value curve, which watching
+      // real sales cannot do.
+      onSell,
+    },
 
     debugSpawn(n) {
       const want = n | 0 || 1;
@@ -644,9 +921,12 @@ export async function createWorld(view, orbit) {
     update(dt) {
       time += dt;
       ticker.update(dt);
-      if (partsDirty) rebuildParts();
-      flow.draw(time);
+      // animateFx runs BEFORE the parts rebuild because it is what decides whether a rebuild is
+      // needed this frame: a pad mid-reaction sets fxLoud, an idle factory leaves it false and the
+      // instancer is not touched at all.
       animateFx(dt);
+      if (partsDirty || fxLoud) rebuildParts();
+      flow.draw(time);
       // The belt bed follows how many belts are actually carrying. audio.belts() is idempotent, so
       // this just states the current count every frame.
       api.audio?.belts?.(flow.runningLanes);

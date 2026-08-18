@@ -192,3 +192,89 @@ Silhouette ramp: slab → bar → rod → column → spire → cluster → star.
 material, not in `ITEMS.tiers` — the loader takes the mesh's own material, so `slag` and
 `iron` here are intentionally darker than the `color` values in `src/config.js`, which are
 used only by the primitive fallback and by UI.
+
+## Round 3 — sorter, tier sell pad, player avatar, cheap-end items
+
+Build script `work/blender/vwbuild3.py`, scene `work/blender/voidworks2.blend`, proofs
+`work/blender/r3-*.png`. Round 2's `vwbuild2.py` is still the source of truth for
+everything it built; `vwbuild3.py` adds five files and takes ownership of three item
+meshes. `vwbuild2.stage_items()` now **skips** slag / iron / copper (`R3_ITEMS`) so a
+later `build_all()` cannot silently revert them.
+
+### `sorter` — belt family, filters by material tier
+
+| file | footprint | tris | height | pane |
+|---|---|---|---|---|
+| `sorter` | 1×1 | 1024 | 0.001–0.878 | horizontal scanner lens + a slit on both faces of the beam + the corner beacon |
+
+Same swept `PROF` cross-section, same cleat pitch and roller bosses as `belt-straight`, so
+it tiles into a run and items ride through at y = 0.34. Reaches ±0.503 laterally, exactly
+like `belt-straight` — that is the roller bosses, not an overhang.
+
+What makes it read as "splits by kind":
+
+- a **scanner arch** at the upstream end — two legs and a crossbeam **over** the belt. No
+  upgrader has a top bar, so the arch is the silhouette that separates this family from
+  both gates. The beam's underside is at y = 0.662, clear of the 0.68 headroom rule.
+- the flank **opens** in the middle third (`PROF_OPEN`, like the merger/splitter pads) and
+  an exit lane with its own bright rails runs out of the cell at 90°, carrying at the same
+  0.34 surface so it meets the neighbouring belt flush.
+- **amber chevrons** in that lane and a diverter blade angled at it.
+- a **tier beacon** on the corner away from the exit — a lit block visible from every side.
+
+**The side exit leaves the −Z face**, i.e. the LEFT of the direction of travel at `rot = 0`
+(forward +X, up +Y). Verified from the exported chevron positions, which sit at
+z = −0.41…−0.11. Place the receiving belt accordingly or set `modelRot`.
+
+### `sellpad-tier` — pays extra for ONE kind
+
+| file | footprint | tris | height |
+|---|---|---|---|
+| `sellpad-tier` | 1×1 | 220 | 0.000–0.384 |
+
+Deliberately still the plainest object in the game. It is the base pad — ink underplate,
+`accentDeep` body, `accent` top at 0.355 — plus exactly one addition: an ink-framed lit
+inlay standing proud of the plate, which is the tier it pays for. The inlay had to sit
+**above** the top plate; sunk into it (the first attempt) it was completely invisible.
+
+### Avatar — `avatar-head`, `avatar-hand-l`, `avatar-hand-r`
+
+In co-op each player is drawn at their camera as a flying head with two separate floating
+hands. **Origin is the centre of each piece, not the build plane** — they never touch it.
+
+| file | tris | size (x × y × z) |
+|---|---|---|
+| `avatar-head` | 1512 | 0.688 × 0.630 × 0.620 |
+| `avatar-hand-l` | 540 | 0.260 × 0.156 × 0.170 |
+| `avatar-hand-r` | 540 | 0.260 × 0.156 × 0.170 |
+
+- **The head faces +X**, the project's forward. The front is a dark visor with two bright
+  eyes under a brow that overhangs it; the rear is a narrow ink spine and a backward-swept
+  near-white fin. The first version put horizontal vent slots on the back and at 40 px they
+  read as a **second face** — the rear now carries no wide dark band at all, and the two
+  ends are told apart by silhouette, not by detail (`work/blender/r3-avatar-far.png`).
+- Both hands and the head share one material slot named **`tint`** — write the player's
+  colour to it at runtime. Remaining slots are the usual `VW_*` neutrals.
+- Hands are mittens: paddle palm, tapered tip, fat thumb on the **inner** face, dark cuff at
+  the wrist. `-l` is the head's +Z side, `-r` its −Z side (thumbs face each other).
+- Placement used in the proof, which is what they were tuned for:
+  `hand = head + forward*0.18 ± left*0.52 − up*0.30`.
+
+### Items — cheap end remade
+
+A blind judge measured the cheap end as too dark and too small to read on a dark belt, and
+called `item-iron` a **missing asset** for the second round running. Round 3 fixes the three
+things that judgement can actually see — size, value and silhouette — and changes nothing
+else: still single-primitive, single-material, origin at the bottom.
+
+| file | tris | shape | colour | was |
+|---|---|---|---|---|
+| `item-slag` | 24 | rough jagged lump, 0.41 wide × 0.19 tall | `#b3a58c` | `#5f6672`, flat slab |
+| `item-iron` | 32 | stepped cast ingot, machined and straight | `#a9c8e2` | `#a9bad0`, low bar |
+| `item-copper` | 96 | round rod with a collar at each end | `#ff9440` | `#e08b4c`, plain rod |
+
+The hue moves are the load-bearing part: the belt is committed to neutral dark greys with
+near-white rail caps, so **any grey item is camouflage**. Slag went warm, iron went cool
+blue, copper went to the `ITEMS.tiers` UI orange instead of a muted version of it. The four
+untouched meshes (`cobalt`, `aurite`, `voidglass`, `singularite`) are byte-identical to
+round 2 — compare lanes in `work/blender/r3-items-belt.png`.

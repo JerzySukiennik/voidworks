@@ -1,6 +1,6 @@
 // Voidworks — belt graph: lane baking, linking, back-pressured item motion and the instanced item draw.
 
-import { GRID, FLOW, ECONOMY } from '../config.js';
+import { GRID, FLOW, ECONOMY, SORTER, SELLPAD } from '../config.js';
 import { dirVec, rotOffset, opposite } from './grid.js';
 import { rollTier, rollValue, clampTier, TOP_TIER } from './items.js';
 
@@ -29,6 +29,11 @@ export function createFlow(ctx) {
   // Conservation ledger. `spawned - sold - destroyed === live` must hold at every instant; it is the
   // property that makes every other claim about the sim checkable, so it is instrumented, not assumed.
   const st = { spawned: 0, sold: 0, destroyed: 0 };
+
+  // The orders module is created after the flow (it needs the economy, which the world builds first),
+  // so the hook is settable rather than construction-only. One line of wiring in world.js instead of
+  // a reordering of its boot.
+  let onDeliver = ctx.onDeliver || null;
 
   let laneList = [];
   let emitters = [];
@@ -125,6 +130,9 @@ export function createFlow(ctx) {
       speed: b.def.speed,
       sink: !!s.sink,
       isOut: !!s.out,
+      // 0 = takes anything (every belt in the game). 1 = the filtered tier's arm of a sorter.
+      // 2 = the everything-else arm. Baked once; the routing decision reads it per item.
+      route: s.route || 0,
       emit: false,
       trig: s.trig === undefined ? -1 : s.trig * len,
       items: [],
@@ -132,8 +140,32 @@ export function createFlow(ctx) {
     };
   }
 
+  // --- per-building material filter -------------------------------------------
+  // A sorter and a Contract Pad each carry ONE number: which material tier they care about. It is
+  // set here rather than in world.js so that every path that creates a building — the player, a save
+  // restore, a network mirror, a test — gets a valid default without any of them having to know.
+  // Baking is also the only moment all three share.
+
+  function filterOf(b) {
+    return b && b.filterTier !== undefined ? b.filterTier : SORTER.defaultTier;
+  }
+
+  function setFilter(b, t) {
+    if (!b || !b.def.filter) return -1;
+    b.filterTier = clampTier(t);
+    b.flash = 1;
+    return b.filterTier;
+  }
+
+  function cycleFilter(b, dir) {
+    if (!b || !b.def.filter) return -1;
+    const n = TOP_TIER + 1;
+    return setFilter(b, (filterOf(b) + (dir || 1) + n * 2) % n);
+  }
+
   function bake(b) {
     const def = b.def;
+    if (def.filter && b.filterTier === undefined) b.filterTier = clampTier(SORTER.defaultTier);
     b.lanes = [];
     const specs = def.lanes || [];
     for (let i = 0; i < specs.length; i += 1) b.lanes.push(bakeLane(b, specs[i]));
@@ -368,7 +400,10 @@ export function createFlow(ctx) {
         }
       }
       if (!lanes.length) continue;
-      l.link = { lanes, t0, rr: 0 };
+      // `sort` is the building being fed, and only when that building sorts. Carrying it on the LINK
+      // rather than looking it up per item keeps the hot loop free of grid lookups and of branches
+      // for the 99% of links that feed ordinary belt.
+      l.link = { lanes, t0, rr: 0, sort: target.def.sort ? target : null };
       // The reverse edge. Spacing is a property of the WORLD, not of one lane's parameter: the point
       // at t = len of this lane and the point at t0 of the lane it feeds are the same place. Without
       // an edge pointing back, a stalled belt packs items on top of each other across every join.
@@ -417,12 +452,29 @@ export function createFlow(ctx) {
     return clearanceAt(lane, t, null) >= FLOW.itemSpacing && !nearSibling(lane, t);
   }
 
+  // Which arms of a link is THIS item allowed to take? For every ordinary junction, all of them.
+  // For a sorter, exactly one — and that is the whole feature. Routing is strict: an item of the
+  // filtered tier may only take the filtered arm, everything else may only take the other, and a
+  // blocked arm makes the item WAIT rather than spill down the wrong one. A sorter that leaked
+  // under back-pressure would be a splitter with a label on it.
+  function routeOk(link, lane, id) {
+    const b = link.sort;
+    if (!b || !lane.route) return true;
+    return lane.route === (iTier[id] === filterOf(b) ? 1 : 2);
+  }
+
   // How much room the far side of a link has. An item may take any arm that is offered, so the arm
   // with the most room is what decides whether the head of this lane may roll up to its exit.
-  function linkClearance(link, from) {
+  // `id` is the head item: on a sorting link the answer depends on WHICH item is asking, because it
+  // is only ever allowed one of the arms.
+  function linkClearance(link, from, id) {
     const n = link.lanes.length;
     let anyLive = false;
-    if (n > 1) {
+    // A dead arm is a trap on a round-robin splitter, so those links only offer arms that lead
+    // somewhere. A sorter is the opposite case: its arms are ASSIGNED, so an arm leading nowhere
+    // must stay open and spill into the void exactly as a dead-ended belt already does — hiding it
+    // would jam the whole line behind a material the player forgot to give an exit to.
+    if (n > 1 && !link.sort) {
       for (let k = 0; k < n; k += 1) {
         const c = link.lanes[k];
         if (c.link || c.sink) { anyLive = true; break; }
@@ -432,6 +484,7 @@ export function createFlow(ctx) {
     for (let k = 0; k < n; k += 1) {
       const c = link.lanes[k];
       if (anyLive && !c.link && !c.sink) continue;
+      if (link.sort && !routeOk(link, c, id)) continue;
       if (c.sink) return Infinity;
       // An arm barred by a lane it yields to offers no room at all. If this said otherwise, the head
       // upstream would roll onto the join expecting to hand off and then find the door shut.
@@ -458,7 +511,7 @@ export function createFlow(ctx) {
     // A splitter arm with nothing attached is a trap: items would round-robin into it and stall
     // there forever. When any arm leads somewhere, only those arms are offered.
     let anyLive = false;
-    if (n > 1) {
+    if (n > 1 && !link.sort) {
       for (let k = 0; k < n; k += 1) {
         const c = link.lanes[k];
         if (c.link || c.sink) { anyLive = true; break; }
@@ -468,6 +521,9 @@ export function createFlow(ctx) {
       const j = (link.rr + k) % n;
       const c = link.lanes[j];
       if (anyLive && !c.link && !c.sink) continue;
+      // The one line that turns a splitter into a sorter. Note it does NOT fall through to another
+      // arm when this one is full: `insertVia` simply returns false and the item stays put.
+      if (link.sort && !routeOk(link, c, id)) continue;
       if (c.sink || (clearanceAt(c, link.t0[j], from, true) >= FLOW.itemSpacing && !nearSibling(c, link.t0[j]))) {
         link.rr = (j + 1) % n;
         laneInsert(c, id, link.t0[j]);
@@ -489,9 +545,22 @@ export function createFlow(ctx) {
   function consume(lane, id) {
     const b = lane.b;
     if (b.def.family === 'sell') {
-      const paid = economy.sell(iValue[id]);
+      const t = iTier[id];
+      // A Contract Pad pays a premium for exactly one material and a penalty for the rest, so the
+      // scaling happens HERE, on the value handed to the bank — economy.sell() stays the single
+      // place the prestige multiplier and the sell rate are applied, and never learns about tiers.
+      let matched = false;
+      let mult = 1;
+      if (b.def.tierPad) {
+        matched = t === filterOf(b);
+        mult = matched ? SELLPAD.matchMult : SELLPAD.missMult;
+      }
+      const paid = economy.sell(iValue[id] * mult);
       b.flash = 1;
-      if (ctx.onSell) ctx.onSell(b, paid, iTier[id]);
+      if (ctx.onSell) ctx.onSell(b, paid, t);
+      // Only a MATCHED delivery into a tier pad counts toward an order. A plain pad contributes
+      // nothing, which is what stops an order being filled by a line that is already running.
+      if (matched && onDeliver) onDeliver(t, 1, b);
       release(id);
       st.sold += 1;
       return true;
@@ -557,7 +626,7 @@ export function createFlow(ctx) {
       if (i === 0) {
         limit = len;
         if (lane.link && !lane.sink && iT[id] + v * dt > len - spacing) {
-          const clr = linkClearance(lane.link, lane);
+          const clr = linkClearance(lane.link, lane, id);
           if (clr < spacing) limit = Math.max(0, len - (spacing - clr));
         }
       }
@@ -774,6 +843,15 @@ export function createFlow(ctx) {
     spawnBurst,
     clear,
     markDirty() { dirty = true; },
+    // The sorter / Contract Pad setting. Exposed rather than owned by the UI so that every consumer
+    // — buildbar, HUD, a hotkey, the network mirror, a test — reads and writes the same one number.
+    filterOf,
+    setFilter,
+    cycleFilter,
+    // cb(tier, count, pad) — fired only when a Contract Pad consumes an item of the material it is
+    // set to. This is the ONLY channel orders listen on, which is what makes "a line already running
+    // cannot fill an order" true by construction rather than by policy.
+    setDeliverHook(fn) { onDeliver = typeof fn === 'function' ? fn : null; },
     // `live` is the whole population — riding a belt or parked in a vault. This is what the cap counts.
     get count() { return live; },
     get onBelts() { return live - stored; },

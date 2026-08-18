@@ -155,14 +155,23 @@ export const CAMERA = {
 
 // --- owned by: economy --------------------------------------------------------
 export const ITEMS = {
+  // `color` is the colour the tier ACTUALLY RENDERS AS, not a wish about it. It had drifted a long
+  // way from the authored glb materials — the config claimed slag was #b6bfcc when the mesh is
+  // #5f6672, and iron #e6ecf5 when the mesh is #a9bad0 — which is how a blind read of the frame
+  // came back with "iron reads as a missing asset" while the table insisted it was near-white.
+  // Each value below is the mesh's own baseColorFactor with FX.item.colorGain applied, i.e. exactly
+  // what leaves the item instancer, and world.js writes the same values back over this table at
+  // load so the two can never separate again — which is not hypothetical: the slag, iron and copper
+  // meshes were remade WHILE this table was being corrected, and the sync is what caught it.
+  // Only cobalt is lifted off its mesh value (x1.2); every other tier is its mesh, verbatim.
   tiers: [
-    { id: 'slag', name: 'Slag', value: 10, color: '#b6bfcc', weight: 40 },
-    { id: 'iron', name: 'Iron', value: 25, color: '#e6ecf5', weight: 26 },
-    { id: 'copper', name: 'Copper', value: 70, color: '#ff8f3d', weight: 16 },
-    { id: 'cobalt', name: 'Cobalt', value: 200, color: '#3d7dff', weight: 9 },
-    { id: 'aurite', name: 'Aurite', value: 650, color: '#ffcf33', weight: 5 },
-    { id: 'voidglass', name: 'Voidglass', value: 2200, color: '#9b6bff', weight: 3 },
-    { id: 'singularite', name: 'Singularite', value: 9000, color: '#ff4f86', weight: 1 },
+    { id: 'slag', name: 'Slag', value: 10, color: '#b3a58c', weight: 40 },
+    { id: 'iron', name: 'Iron', value: 25, color: '#a9c8e2', weight: 26 },
+    { id: 'copper', name: 'Copper', value: 70, color: '#ff9440', weight: 16 },
+    { id: 'cobalt', name: 'Cobalt', value: 200, color: '#5387f3', weight: 9 },
+    { id: 'aurite', name: 'Aurite', value: 650, color: '#f2c94c', weight: 5 },
+    { id: 'voidglass', name: 'Voidglass', value: 2200, color: '#7c5cff', weight: 3 },
+    { id: 'singularite', name: 'Singularite', value: 9000, color: '#ff5c8a', weight: 1 },
   ],
 };
 
@@ -211,6 +220,25 @@ export const ECONOMY = {
   bigSellValue: 1800,
   bigSellRatio: 6,
   saleAverageEase: 0.02,
+
+  // --- coming back after hours away ------------------------------------------
+  // Offline income is credited from the rate the factory was ACTUALLY achieving when it was saved
+  // (`rate`, the same 4-second sales window the HUD shows), never from a theoretical dropper rate.
+  // That is what makes a capped factory honest: at the item cap the droppers stall, the measured
+  // rate falls to the cap's throughput, and the offline credit falls with it — no separate stall
+  // bookkeeping can drift away from what the player was really earning.
+  offlineMaxHours: 4,
+  // An unattended factory must not beat an attended one. Half rate: worth leaving on, never worth
+  // leaving instead of playing.
+  offlineRate: 0.5,
+  // Below this there is nothing to report — a reload is not "being away".
+  offlineMinSeconds: 60,
+  // Time constant of the stall tracker (seconds). Long enough that a one-second hiccup at the cap
+  // does not read as "capped", short enough that the last few minutes before you walked away are
+  // what the summary describes.
+  stallTau: 60,
+  // Above this share of tracked time at the cap, the away summary says the line is the bottleneck.
+  stallCappedAt: 0.5,
 };
 
 // --- owned by: flow -----------------------------------------------------------
@@ -632,4 +660,297 @@ export const HUD = {
   stall: '#c07d0e',
   rollTau: 0.16,
   fadeSeconds: 0.28,
+};
+
+// --- owned by: economy (progression) ------------------------------------------
+// Two long-game curves live here. Both read lifetime money, and both are deliberately sub-linear so
+// that no amount of stacking multipliers can make the next milestone arrive faster than the last.
+
+export const PRESTIGE = {
+  // Points are earned from THIS run's `earned`, on a square-root curve:
+  //   gain = floor(scale * sqrt(earned / requirement))
+  // 100k -> 1 point, 400k -> 2, 900k -> 3, 2.5M -> 5, 10M -> 10. The first reset is cheap enough to
+  // be tempting; the fourth costs sixteen times the first. Linear would have made every reset the
+  // same decision forever, which is the one thing a prestige curve must not do.
+  requirement: 100000,
+  scale: 1,
+
+  // Each point is +25% on the SALE PRICE — the single number every item in the game funnels through
+  // on its way to money, and the only one that cannot interact with the item cap. Multiplying
+  // spawn rate or upgrader output instead would compound against a fixed cap and run away; sale
+  // value cannot, because the cap already decides how many items reach the pad.
+  //
+  // The loop is self-damping on purpose: sale value scales the run's `earned` linearly, but points
+  // come from its square root, so doubling the multiplier buys only ~1.41x the next point haul.
+  perPoint: 0.25,
+
+  // You cannot reset for nothing. One full point is the floor.
+  minGain: 1,
+};
+
+export const UNLOCKS = {
+  // Lifetime earned (across prestiges) needed for each unlock level. Level 0 is always open.
+  // Each threshold is ~2x the cheapest CORE building gated behind it — the cheapest dropper,
+  // upgrader or store, ignoring the cheap belt-family pieces that ride along with the tier.
+  // The 2x comes from what a real player's books look like: by the time lifetime earnings are twice
+  // a building's price, they have paid off their current line and have roughly its cost banked, so
+  // the tier opens the moment it is affordable rather than as a sign to go grind.
+  //
+  //   L1  Ore Dropper 1400, Refiner 2600, fast/sky belts     ->    2,000
+  //   L2  Fusion Furnace 9000, Deep Drill 12000, Crucible    ->   25,000
+  //   L3  Transmuter 45000, Gamble Press 60000, Reactor      ->  120,000
+  //   L4  Void Infuser 190000, Void Extractor 250000, Nova   ->  500,000
+  //   L5  Singularity Gate 1600000                           -> 4,000,000
+  //
+  // Assumed pacing on a first playthrough: a starter loop earns a few $/s, so L1 lands inside the
+  // first ten minutes — early enough that the bar is never a wall, late enough that the player has
+  // built one loop with their own hands before being handed a second dropper.
+  thresholds: [0, 2000, 25000, 120000, 500000, 4000000],
+};
+
+// --- owned by: net ------------------------------------------------------------
+// Co-op presence: what another player looks like when they are in your factory.
+//
+// Jurek rejected a ground cursor outright, and the reason is geometric rather than aesthetic: a dot
+// on the build plane says where somebody's camera happens to point, which is not where they ARE and
+// says nothing about which way they are facing. Rotate the world and the dot is meaningless. So the
+// camera itself becomes the body — a floating head with two detached hands and a name over it, sat
+// exactly at the remote player's eye. Facing is then free information: the head looks where the
+// player looks, because it IS where the player looks from.
+export const PRESENCE = {
+  // Pose is the only thing on this wire that changes continuously, so it is metered twice: a rate
+  // cap AND a dead-band. A player sitting still sends literally nothing.
+  poseHz: 6,
+  posEpsilon: 0.25,        // world units of camera movement below which a sample is skipped
+  angleEpsilon: 0.02,      // radians of turn below which a sample is skipped
+
+  // Wire precision. The deployed rules cap the cursor packet at 64 characters (see
+  // database.rules.json — `cursors/$uid/p`), and `$other: false` there forbids adding a sibling
+  // field, so EVERYTHING rides in that one string. 1/20 of a unit is far below what is visible on
+  // a head tens of units away, and it keeps the packed string near 45 characters with headroom.
+  posePrecision: 20,
+  anglePrecision: 100,
+
+  // The body. Deliberately small — this is a marker of a person, not a character model, and it has
+  // to sit in a dense factory without hiding a belt.
+  // The authored head is 0.688 x 0.630 x 0.620 with its origin at the CENTRE (not the build plane)
+  // and its face on +X. headRadius only shapes the primitive fallback and the label height.
+  headRadius: 0.34,
+  handRadius: 0.13,
+  // The modeller's own numbers, tuned against the authored meshes:
+  //   hand = head + forward * 0.18 +/- left * 0.52 - up * 0.30
+  handGap: 0.52,           // sideways offset of each hand from the head centre
+  handForward: 0.18,       // and slightly in front of the face, where hands actually are
+  handDrop: 0.30,          // and how far below it they hang
+  handLag: 7.0,            // exponential follow rate; lower = the hands trail further behind
+  bobAmp: 0.075,
+  bobHz: 0.55,
+
+  // Remote poses arrive 6 times a second. Interpolating at these rates is what turns six samples
+  // into a glide instead of six teleports.
+  smoothPos: 9,
+  smoothRot: 9,
+
+  // The name plate. Sprites always face the viewer for free; the work here is keeping it readable,
+  // which means scaling with distance (so it holds a roughly constant screen size) but CLAMPED at
+  // both ends, or it is a postage stamp across the map and a billboard when you fly into it.
+  labelHeight: 1.05,       // above the head centre
+  labelScale: 0.035,       // world units of height per unit of distance from the viewer
+  labelMin: 0.34,
+  labelMax: 1.30,
+  labelPixels: 34,         // canvas font size; the texture is authored once per player
+
+  // A ping is fired at the cell under the pointer and lives on the receiver's clock, not the
+  // sender's — see avatars.js. `key` is free: placement owns r/x/Escape/Delete, the buildbar owns
+  // Tab and 1-9, and orbit owns wasd/arrows/q/e/f/space.
+  ping: {
+    key: 'v',
+    life: 4.5,
+    pool: 12,
+    rise: 1.6,             // how far the beam climbs over its life
+    ringRadius: 0.46,
+    beamHeight: 2.2,
+  },
+
+  // Authored by the modeller. Missing or broken, every one of them falls back to a primitive, so
+  // this feature can never hard-fail on an asset.
+  models: { head: 'avatar-head', handL: 'avatar-hand-l', handR: 'avatar-hand-r', tint: 'tint' },
+
+  // Beyond this many remote players nothing more is drawn. NET.maxPlayers is 6; this is the guard
+  // rail for a room that somehow holds more.
+  maxDrawn: 8,
+};
+
+// --- owned by: machines (sorter · tier pad · orders · undo) -------------------
+// Three economic systems that only pay off together: the sorter splits a mixed line by material,
+// the tier pad pays a premium for exactly one material, and an order asks for a quantity of one
+// material inside a time limit. None of them is worth building alone, which is the point.
+
+export const SORTER = {
+  // Which material a freshly placed sorter (or tier pad) filters until the player says otherwise.
+  // Slag: the thing a scrap line has too much of, so the default setting is immediately useful.
+  defaultTier: 0,
+
+  // Routing is STRICT, never opportunistic. An item of the filtered tier may only take the side
+  // exit and everything else may only go straight; if its exit is blocked it waits. A sorter that
+  // spilled overflow down the wrong arm when it got busy would be a splitter wearing a costume,
+  // and every layout built on it would be a lie under load.
+  //
+  // A sorter's arms behave like any other belt end: an arm that leads nowhere spills into the void
+  // rather than jamming the line, exactly as a dead-ended conveyor already does.
+  strict: true,
+
+  // The glb ships one `pane` slot to be tinted to the filtered tier's colour. Until it lands the
+  // primitive pane is neutral steel-blue, so a sorter still reads as "something decides here".
+  paneColor: '#5b6472',
+  paneOpacity: 0.55,
+};
+
+export const SELLPAD = {
+  // Why these two numbers and not any others. On a Scrap Dropper the mix is 40 slag (10) to
+  // 26 iron (25), so the average item is worth 15.91 into a plain pad.
+  //
+  //   plain pad, unsorted        (40*10 + 26*25) / 66            = 15.91 per item
+  //   ONE iron pad, unsorted     (40*10*0.35 + 26*25*2.2) / 66   = 23.79 per item   (1.49x)
+  //   sorted: iron -> iron pad,  (40*10*1.0 + 26*25*2.2) / 66    = 27.73 per item   (1.74x)
+  //   slag -> plain pad
+  //
+  // Sorting therefore beats a plain pad by 1.74x AND beats dumping the same mixed line into a tier
+  // pad by 1.17x — so the pad is only worth its price once a sorter stands in front of it, which is
+  // the whole reason it exists. The mismatch penalty is what does that work: at missMult = 1.0 the
+  // tier pad would be a free upgrade over the plain pad and sorting would be optional decoration.
+  matchMult: 2.2,
+  missMult: 0.35,
+};
+
+export const ORDERS = {
+  enabled: true,
+
+  // Two at a time, and never two for the same material. The cap is what stops orders stacking into
+  // an exploit: bonus income is bounded by (slots * bonus / duration) no matter how big the factory.
+  slots: 2,
+
+  // Seconds. Long enough to build the line the order needs, short enough that it is a decision.
+  duration: 150,
+
+  // Seconds between an order ending (completed or expired) and the slot refilling. An expired order
+  // costs the player this gap and the bonus it would have paid — and NOTHING else. There is no fine,
+  // no reputation, no lost multiplier: an idle factory should never go backwards.
+  cooldown: 20,
+
+  // How many units each tier asks for. Higher tiers are rarer, so they ask for fewer.
+  units: [30, 24, 18, 12, 8, 5, 3],
+
+  // Payout = units * baseValue(tier) * bonusRate, credited once on completion.
+  // 1.5x the raw goods, on top of what the pad already paid for them.
+  bonusRate: 1.5,
+
+  // An order only counts deliveries into a TIER PAD SET TO ITS OWN MATERIAL. This is the design
+  // constraint that stops an order being satisfied by a line that already exists doing nothing new:
+  // a plain sell pad contributes zero, so filling an order always means building a sorter and a
+  // matched pad, or re-targeting ones you already own.
+  requireMatchedPad: true,
+
+  // Orders never ask for a material the player has not sold at least once, so the board can never
+  // show a contract that is impossible with the droppers currently unlocked.
+  minTier: 0,
+};
+
+export const UNDO = {
+  // How many actions deep the stack goes. One dragged run is ONE action.
+  depth: 60,
+
+  // Undo is refused outright in co-op. See src/build/placement.js for the reasoning.
+  coop: false,
+};
+
+// --- owned by: scene life (FX) ------------------------------------------------
+// Everything here animates or brightens something that is ALREADY in the scene. Nothing in this
+// block may create an object, a material pool or a draw call at runtime: the measured wall in this
+// game is ~2000 draw calls from 1146 building meshes (work/PERF-PROTOCOL.md), so "make it feel
+// alive" has to be paid for out of uniforms, instance attributes and transforms of meshes that
+// exist either way. Every number below is a multiplier on something already being submitted.
+export const FX = {
+  // Master switch. `world.fx.setEnabled(false)` restores the pre-FX look inside one page load,
+  // which is how work/tools/fxtest.mjs does its A/B without a second launch.
+  enabled: true,
+
+  belt: {
+    // The belt band is a shared GLB material, so a travelling stripe costs ONE uniform write per
+    // frame for the whole factory — not one update per belt. Patched onto the materials named
+    // below wherever they appear in a belt-family or upgrader mesh.
+    materials: ['VW_rubber', 'VW_rubberLight'],
+    // Stripes per world unit along the belt's local +X (forward), and how fast they travel.
+    // `speed` is deliberately a little under FLOW.beltSpeed: a surface that scrolls exactly as fast
+    // as the cargo reads as a still image with the cargo glued to it.
+    frequency: 1.6,
+    speed: 1.55,
+    // Added straight onto the shaded colour. The band is lin 0.031 — nearly black — so this is a
+    // large relative change from a small absolute one.
+    gain: 0.075,
+    // Shapes the stripe: higher = thinner, sharper chevron; 1 = a plain sine wash.
+    sharpness: 2.6,
+  },
+
+  // A dropper is a stamp press: it punches down on the frame it emits and springs back.
+  dropper: { dip: 0.115, squash: 0.1, decay: 5.2 },
+
+  // The pane pulse already existed; this sharpens it and adds a body flex so a fired gate moves
+  // as well as glows.
+  upgrader: { swell: 0.055, decay: 3.4, emissiveBase: 0.55, emissiveGain: 2.6, opacityBase: 0.5, opacityGain: 0.34 },
+
+  // The furnace is a primitive-parts building, so its reaction rides the part instancer.
+  furnace: { swell: 0.13, dip: 0.05, glow: 2.4, decay: 3.0 },
+
+  // --- the sell pad ----------------------------------------------------------
+  // Intensity is a log map of the item's value, so it spans four orders of magnitude of sale
+  // without the cheap end vanishing or the rare end clipping. Slag (10) lands at `base`; a
+  // singularite or a heavily upgraded item lands near base+gain.
+  sell: {
+    lo: 10,
+    hi: 20000,
+    base: 0.09,
+    gain: 0.95,
+    // What the intensity buys, at full strength.
+    swell: 0.16,
+    dip: 0.055,
+    // Multiplied into the pad's per-instance colour. Above ~2.6 the green clears the bloom
+    // threshold (RENDER.bloom.threshold), which is what makes a rare landing an actual event.
+    glow: 3.4,
+    decay: 2.6,
+  },
+
+  // --- items -----------------------------------------------------------------
+  // A blind judge measured the cargo as too dark and too small to find on a dark belt, with iron
+  // reading as a missing asset. All three knobs below act on the instanced item meshes, so they
+  // change nothing about the draw-call count: seven instanced meshes before, seven after.
+  item: {
+    // These numbers were retuned DOWNWARD once the remade slag, iron and copper meshes landed. The
+    // first pass assumed the old dark meshes (slag lum 0.13, iron 0.48) and applied gains of 2.05
+    // and 1.5; against the new ones (slag 0.38, iron 0.55) that double-corrected into a washed-out
+    // near-white and items wide enough to bury the belt. The modeller owns size and albedo now;
+    // what is left here is the part the mesh cannot do for itself — height off the belt, a little
+    // emissive so a matte chunk survives the unlit side of a low-key rig, and a small size nudge.
+    //
+    // Size multiplier on top of the authored mesh. Slag is the widest at 0.42 units and the item
+    // spacing is 0.46, so anything much above 1.1 makes neighbours touch and the belt stops
+    // reading between the cargo. 1.08 is the most that fits.
+    scale: 1.08,
+    // Extra height above the belt surface. Lifts the item clear of the trough between the rails
+    // and gives it a cast shadow to sit on, which is most of what makes it read as an object
+    // rather than as a texture detail.
+    lift: 0.05,
+    // Per-tier albedo gain on the AUTHORED glb colour, clamped per channel at 1. Now 1.0 almost
+    // everywhere: the meshes are finally bright enough on their own. Cobalt is the one exception —
+    // at lum 0.213 it is the darkest non-glowing tier and it sits on a lum 0.037 belt.
+    colorGain: [1.0, 1.0, 1.0, 1.2, 1.0, 1.0, 1.0],
+    // Per-tier emissive intensity, emissive colour = the (gained) albedo. This is the knob that
+    // actually buys legibility on a dark belt under a low key light, because it does not depend on
+    // the item catching the key at all. The top two tiers glow by design and keep more of it.
+    emissive: [0.12, 0.12, 0.1, 0.18, 0.14, 0.34, 0.4],
+  },
+
+  // ITEMS.tiers[].color is written back from the authored glb materials at load, so the config,
+  // the UI chips and the meshes can never drift apart again the way they had.
+  syncTierColours: true,
 };

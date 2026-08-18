@@ -1,6 +1,7 @@
 // Voidworks — InstancedMesh pools: one pool per item tier and one per static building part kind.
 
 import * as THREE from 'three';
+import { FX } from '../config.js';
 import { TIERS, tierGeometry, tierMaterial } from '../world/items.js';
 
 const _m = new THREE.Matrix4();
@@ -9,21 +10,47 @@ const _p = new THREE.Vector3();
 const _s = new THREE.Vector3();
 const _e = new THREE.Euler();
 
+// The cargo is the thing the player is actually watching, and it was measured — blind — as too dark
+// and too small to find on a dark belt. All three fixes live here rather than in the meshes, because
+// the item pools are seven InstancedMeshes: size, lift and brightness are free, and stay free at 900
+// items. Each tier keeps BOTH tunings in userData, so setEnabled() can swap between the authored
+// glb look and the tuned one in place — which is what lets work/tools/fxtest.mjs A/B legibility
+// inside a single page load rather than across two launches.
+function brightenItemMaterial(source, i) {
+  const m = source.clone();
+  const gain = (FX.item.colorGain && FX.item.colorGain[i]) || 1;
+  m.color.multiplyScalar(gain);
+  m.color.r = Math.min(1, m.color.r);
+  m.color.g = Math.min(1, m.color.g);
+  m.color.b = Math.min(1, m.color.b);
+  const e = (FX.item.emissive && FX.item.emissive[i]) || 0;
+  if (m.emissive) {
+    m.emissive.copy(m.color);
+    m.emissiveIntensity = e;
+  }
+  m.userData.vwBase = { color: source.color.clone(), emissive: m.emissive ? source.emissive.clone() : null, emissiveIntensity: source.emissiveIntensity };
+  m.userData.vwLit = { color: m.color.clone(), emissive: m.emissive ? m.emissive.clone() : null, emissiveIntensity: e };
+  return m;
+}
+
 // `authored` optionally supplies {geometry, material, yOffset} per tier from the glb items, whose
 // origin sits at the bottom of the mesh rather than its centre.
 export function createItemInstancer(parent, capacity, authored) {
   const meshes = [];
   const counts = new Int32Array(TIERS.length);
   const lift = new Float32Array(TIERS.length);
+  const baseLift = new Float32Array(TIERS.length);
   // A bottom-origin mesh must not be tilted: it would swing off the belt instead of turning on it.
   const tiltMul = new Float32Array(TIERS.length).fill(1);
+  let sizeMul = FX.enabled ? FX.item.scale : 1;
 
   for (let i = 0; i < TIERS.length; i += 1) {
     const model = authored && authored[i];
-    if (model) { lift[i] = model.yOffset || 0; tiltMul[i] = 0; }
+    if (model) { baseLift[i] = model.yOffset || 0; tiltMul[i] = 0; }
+    lift[i] = baseLift[i] + (FX.enabled ? FX.item.lift : 0);
     const mesh = new THREE.InstancedMesh(
       model ? model.geometry : tierGeometry(i),
-      model ? model.material : tierMaterial(i),
+      model ? brightenItemMaterial(model.material, i) : tierMaterial(i),
       capacity,
     );
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -36,8 +63,24 @@ export function createItemInstancer(parent, capacity, authored) {
     meshes.push(mesh);
   }
 
+  // Flips the whole legibility pass on or off in place — same meshes, same pools, same draw calls,
+  // only the size, the height off the belt and the material tuning change.
+  function setEnabled(on) {
+    sizeMul = on ? FX.item.scale : 1;
+    for (let i = 0; i < TIERS.length; i += 1) {
+      lift[i] = baseLift[i] + (on ? FX.item.lift : 0);
+      const m = meshes[i] && meshes[i].material;
+      const tune = m && m.userData && (on ? m.userData.vwLit : m.userData.vwBase);
+      if (!tune) continue;
+      m.color.copy(tune.color);
+      if (m.emissive && tune.emissive) m.emissive.copy(tune.emissive);
+      if (tune.emissiveIntensity !== undefined) m.emissiveIntensity = tune.emissiveIntensity;
+    }
+  }
+
   return {
     meshes,
+    setEnabled,
     begin() { counts.fill(0); },
     push(t, x, y, z, spin, tilt, scale) {
       const n = counts[t];
@@ -46,7 +89,8 @@ export function createItemInstancer(parent, capacity, authored) {
       _e.set(tl, spin, tl * 0.6);
       _q.setFromEuler(_e);
       _p.set(x, y + lift[t], z);
-      _s.set(scale, scale, scale);
+      const sc = scale * sizeMul;
+      _s.set(sc, sc, sc);
       _m.compose(_p, _q, _s);
       meshes[t].setMatrixAt(n, _m);
       counts[t] = n + 1;
@@ -171,25 +215,50 @@ export function createLabelPool(parent, size, camera) {
   };
 }
 
+// The part instancer is now rebuilt EVERY frame on which something is reacting (a sell pad taking a
+// sale, a furnace fusing), not only when the factory changes shape, because that is what lets a
+// primitive-parts building animate without owning a mesh of its own. Two consequences drove the
+// rewrite below:
+//
+//   1. It must not allocate. The old push() did `matrix.clone()` into a per-frame array, which at
+//      60 Hz and ~850 parts is a garbage firehose. Each pool now owns one Float32Array that IS the
+//      InstancedBufferAttribute's storage, and `matrix.toArray(data, offset)` writes straight into
+//      it — zero objects per frame.
+//   2. It must be able to make ONE instance brighter without splitting the pool. A second material
+//      would be a second draw call; `instanceColor` is a per-instance vertex attribute on the same
+//      draw call. Every instance carries a scalar glow (1 = untouched), so the sell pad can flare
+//      while the identical accent strip on a vault next to it does not.
 export function createPartInstancer(parent, geometries, materials, markTransparent) {
   const pools = new Map();
+
+  function alloc(p, capacity) {
+    p.capacity = capacity;
+    p.data = new Float32Array(capacity * 16);
+    p.tint = new Float32Array(capacity * 3).fill(1);
+  }
 
   function pool(geoName, matName) {
     const key = `${geoName}|${matName}`;
     let p = pools.get(key);
     if (!p) {
-      p = { key, geoName, matName, capacity: 64, count: 0, mesh: null };
+      p = { key, geoName, matName, capacity: 0, count: 0, mesh: null, data: null, tint: null };
+      alloc(p, 64);
       pools.set(key, p);
     }
     return p;
   }
 
   function ensure(p) {
-    if (p.mesh && p.mesh.instanceMatrix.count >= p.capacity) return;
+    if (p.mesh && p.mesh.instanceMatrix.array === p.data) return;
     if (p.mesh) { parent.remove(p.mesh); p.mesh.dispose(); }
     const material = materials[p.matName];
     const mesh = new THREE.InstancedMesh(geometries[p.geoName], material, p.capacity);
+    // Hand the pool's own arrays to the attributes rather than copying into three's: the rebuild
+    // then writes directly at the storage the renderer uploads from.
+    mesh.instanceMatrix = new THREE.InstancedBufferAttribute(p.data, 16);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(p.tint, 3);
+    mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
     mesh.frustumCulled = false;
     mesh.castShadow = !material.transparent;
     mesh.receiveShadow = !material.transparent;
@@ -201,24 +270,37 @@ export function createPartInstancer(parent, geometries, materials, markTranspare
     p.mesh = mesh;
   }
 
+  function grow(p, want) {
+    const capacity = Math.max(p.capacity * 2, want + 8);
+    const data = p.data;
+    const tint = p.tint;
+    alloc(p, capacity);
+    p.data.set(data);
+    p.tint.set(tint);
+  }
+
   return {
     pools,
     begin() { for (const p of pools.values()) p.count = 0; },
-    push(geoName, matName, matrix) {
+    // `glow` multiplies this instance's albedo. Undefined means 1, i.e. exactly what the material says.
+    push(geoName, matName, matrix, glow) {
       const p = pool(geoName, matName);
-      if (p.count >= p.capacity) p.capacity = Math.max(p.capacity * 2, p.count + 8);
-      p.count += 1;
-      if (!p.pending) p.pending = [];
-      p.pending.push(matrix.clone());
+      if (p.count + 1 > p.capacity) grow(p, p.count + 1);
+      const n = p.count;
+      matrix.toArray(p.data, n * 16);
+      const g = glow === undefined ? 1 : glow;
+      const c = n * 3;
+      p.tint[c] = g;
+      p.tint[c + 1] = g;
+      p.tint[c + 2] = g;
+      p.count = n + 1;
     },
     end() {
       for (const p of pools.values()) {
         ensure(p);
-        const list = p.pending || [];
-        for (let i = 0; i < list.length; i += 1) p.mesh.setMatrixAt(i, list[i]);
-        p.mesh.count = list.length;
+        p.mesh.count = p.count;
         p.mesh.instanceMatrix.needsUpdate = true;
-        p.pending = null;
+        p.mesh.instanceColor.needsUpdate = true;
       }
     },
     dispose() {

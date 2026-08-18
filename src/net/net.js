@@ -6,9 +6,15 @@
 // That is why the wrappers are installed on join and restored on leave rather than living inside
 // world.js: singleplayer never executes a line of this.
 
-import { ECONOMY, NET } from '../config.js';
+import { ECONOMY, NET, PRESENCE } from '../config.js';
 import { createSession } from './session.js';
 import { escapeName, makeRoomCode, normalizeCode } from './util.js';
+
+// NOTE: ./avatars.js is imported DYNAMICALLY, inside connect(), and that is not a style choice.
+// avatars.js imports three, which resolves through the page's importmap and does not exist as a node
+// package — so a static import here would make `import('src/net/net.js')` explode in every headless
+// harness we own (work/tools/net-sim.mjs is 38 checks of exactly that). Loading it at join time also
+// means singleplayer never even fetches the module.
 
 export { makeRoomCode, normalizeCode, escapeName };
 
@@ -33,6 +39,12 @@ function refundFor(economy, def) {
 
 export function createNetLink(world) {
   let session = null;
+  // Built on join, torn down on leave. Singleplayer never constructs it, so with nobody hosting
+  // there is no group in the scene, no listener on the document and nothing on any wire.
+  let avatars = null;
+  let pingSeq = 0;
+  let pingCell = { x: 0, z: 0 };
+  let keyHandler = null;
   let status = 'off';
   let error = null;
   const statusListeners = [];
@@ -350,14 +362,76 @@ export function createNetLink(world) {
       if (kind === 'add') applyRemoteBuild(entry);
       else if (kind === 'remove') applyRemoteRemove(entry);
     }));
-    offs.push(session.presence.onChange(() => setStatus('live')));
+    // --- presence: the other players, as bodies -------------------------------
+    // Guarded on the world actually having a renderer: the headless harnesses drive this same bridge
+    // against a world with no scene and no camera, and co-op must work there exactly as it does in
+    // the browser, minus the drawing. A failure to load the layer is logged and dropped — losing the
+    // avatars is a cosmetic loss, and it must never take the session down with it.
+    if (world.view && world.view.scene && world.view.camera) {
+      try {
+        const mod = await import('./avatars.js');
+        avatars = mod.createAvatars({ scene: world.view.scene, camera: world.view.camera });
+        avatars.setSelf(session.uid);
+        avatars.sync(session.roster());
+      } catch (err) {
+        avatars = null;
+        console.warn('[net] the avatar layer failed to load, co-op continues without bodies —', err && err.message);
+      }
+    }
+    offs.push(session.presence.onChange((list) => {
+      if (avatars) avatars.sync(list);
+      // Somebody arrived or left: re-announce this client's pose on the next frame even if it has
+      // not moved a millimetre, so a newcomer sees a stationary player immediately.
+      session.presence.repose();
+      setStatus('live');
+    }));
+    offs.push(session.presence.onCursor((id, p) => {
+      if (!avatars) return;
+      avatars.pose(id, p.x, p.y, p.z, p.az, p.pol);
+      // The ping rides in the same packet. It fires on a CHANGE of the counter and on nothing else,
+      // so a client that joins mid-ping adopts the current counter silently instead of replaying it.
+      avatars.applyPingSeq(id, p.seq, p.px, p.pz);
+    }));
+
+    // One key, bound only while a room is open and removed when it closes. `v` is free: placement
+    // owns r/x/Escape/Delete, the buildbar owns Tab and 1-9, orbit owns wasd/arrows/q/e/f/space.
+    if (avatars) keyHandler = (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (String(e.key).toLowerCase() !== PRESENCE.ping.key) return;
+      ping();
+    };
+    if (keyHandler) addEventListener('keydown', keyHandler);
+
     offs.push(session.authority.onChange(() => setStatus('live')));
 
     setStatus('live');
     return info;
   }
 
+  // Point at the cell under the pointer (or an explicit one, which is what the suite drives). The
+  // marker is drawn locally at once — a ping you have to wait a round trip to see feels broken —
+  // and the counter is what carries it to everyone else on the next pose packet, which publishPose
+  // sends immediately rather than at the next rate-limited slot.
+  function ping(x, z) {
+    if (!session || !avatars) return false;
+    const cell = world.placement && world.placement.cell ? world.placement.cell : null;
+    const cx = Math.round(Number.isFinite(x) ? x : (cell ? cell.x : 0));
+    const cz = Math.round(Number.isFinite(z) ? z : (cell ? cell.z : 0));
+    // The rules bound a build cell to +/-64 and the wire budget assumes three digits; a ping fired
+    // from a wildly panned camera must not blow the packet.
+    pingCell.x = Math.max(-999, Math.min(999, cx));
+    pingCell.z = Math.max(-999, Math.min(999, cz));
+    pingSeq = (pingSeq % 999) + 1;
+    avatars.firePing(session.uid, pingCell.x, pingCell.z);
+    return true;
+  }
+
   function leave() {
+    if (keyHandler) { removeEventListener('keydown', keyHandler); keyHandler = null; }
+    if (avatars) { avatars.dispose(); avatars = null; }
+    pingSeq = 0;
     for (const off of offs) {
       try { off(); } catch { /* already detached */ }
     }
@@ -393,19 +467,29 @@ export function createNetLink(world) {
     world.economy.money = target;
     shadow = target;
 
+    // The pose. It is the CAMERA that is published, not the orbit target: the head is the eye, and
+    // the two angles are the sender's own orbit state, so the receiver reconstructs the exact view
+    // direction rather than guessing at it from a point on the ground.
     const orbit = world.orbit;
-    if (orbit && orbit.target) {
+    const camera = world.view && world.view.camera;
+    if (orbit && orbit.state && camera) {
       const cell = world.placement && world.placement.cell ? world.placement.cell : null;
-      session.presence.publishCursor(
-        orbit.target.x, orbit.target.y, orbit.target.z,
+      session.presence.publishPose(
+        camera.position.x, camera.position.y, camera.position.z,
+        orbit.state.azimuth, orbit.state.polar,
         cell ? cell.x : 0, cell ? cell.z : 0,
+        pingSeq, pingCell.x, pingCell.z,
       );
     }
+
+    if (avatars) avatars.update(dt);
   }
 
   return {
     update,
     leave,
+    ping,
+    get avatars() { return avatars; },
     host: (name, code) => connect('host', name, code),
     join: (name, code) => connect('join', name, code),
     get active() { return Boolean(session); },

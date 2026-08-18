@@ -869,6 +869,10 @@ export async function createWorld(view, orbit) {
     priceOf: (d) => economy.priceOf(typeof d === 'string' ? getDef(d) : d),
     orders,
     prestige() {
+      // Jurek's call: singleplayer only. In a room the shared bank overwrites local money every
+      // snapshot, so one client resetting is undefined — it would either desync the bank or hand this
+      // player a multiplier paid for by income other people's sales are mixed into.
+      if (api.net && api.net.active) return { refused: 'coop' };
       const res = economy.prestige();
       if (!res) return null;
       clearAll();

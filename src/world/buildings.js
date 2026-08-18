@@ -39,8 +39,8 @@ export const MATERIALS = {
   gold: mat(PALETTE.gold, { roughness: 0.3, metalness: 0.6, emissive: new THREE.Color(PALETTE.gold), emissiveIntensity: 0.18 }),
 };
 
-function part(g, m, px, py, pz, sx, sy, sz, ry, rx) {
-  return { g, m, p: [px, py, pz], s: [sx, sy, sz], r: [rx || 0, ry || 0, 0] };
+function part(g, m, px, py, pz, sx, sy, sz, ry, rx, rz) {
+  return { g, m, p: [px, py, pz], s: [sx, sy, sz], r: [rx || 0, ry || 0, rz || 0] };
 }
 
 // --- pane colour: derived from the effect so it can never drift from the numbers ---
@@ -448,12 +448,32 @@ for (const d of BUILDINGS) {
   for (const c of d.cells) { ox += c[0]; oz += c[1]; }
   d.modelOffset = [ox / d.cells.length, oz / d.cells.length];
 }
+// A straight belt's mesh is symmetric front to back, so rotating it 180 degrees changes where items
+// GO while changing nothing you can see. Rotation looked broken for exactly that reason. These
+// chevrons sit on the rails pointing the way items travel, so direction is readable on a placed belt
+// and not only in the build hologram. They ride `modelExtras`, which the part instancer already
+// draws, so a factory full of them still costs no extra draw calls.
+function dirMarks(y, mat) {
+  const h = y === undefined ? 0.435 : y;
+  const m = mat || 'steelLight';
+  const out = [];
+  for (const x of [-0.22, 0.22]) {
+    for (const z of [-0.44, 0.44]) {
+      out.push(part('pyr', m, x, h, z, 0.13, 0.17, 0.09, 0, 0, -Math.PI / 2));
+    }
+  }
+  return out;
+}
+
 // The fast belt reuses the plain belt mesh, so a green stripe along each rail top marks it out.
 // The glb's rails top out at 0.425 and its bed carries at 0.34, so this sits on the rail, clear of items.
 getDefRaw('belt_fast').modelExtras = [
   part('box', 'accent', 0, 0.435, -0.44, 0.92, 0.03, 0.07),
   part('box', 'accent', 0, 0.435, 0.44, 0.92, 0.03, 0.07),
+  ...dirMarks(0.47, 'accentDeep'),
 ];
+getDefRaw('belt').modelExtras = dirMarks();
+getDefRaw('belt_elev').modelExtras = dirMarks(0.435 + RISE);
 
 function getDefRaw(id) { return BUILDINGS.find((d) => d.id === id); }
 

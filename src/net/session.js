@@ -407,7 +407,17 @@ export function createSession(options) {
     const bid = `${uid}_${buildCounter.toString(36)}`;
     const claimed = [];
     for (const key of cells) {
-      const result = await driver.transact(claimPath(key), (current) => (current ? undefined : bid));
+      // A claim is only meaningful while the building it was taken for still exists. Anything else is
+      // garbage: a client that died between claiming the ground and publishing the building, or a
+      // release that never landed. Because claims live server-side, one such orphan makes a cell
+      // permanently unbuildable — across sessions, for everyone, forever — which is exactly the
+      // "I deleted it and now nothing fits there" report. So a contended cell is re-checked against
+      // `builds`, and a claim whose owner is not there is taken over rather than obeyed.
+      const result = await driver.transact(claimPath(key), (current) => {
+        if (!current) return bid;
+        if (current === bid) return bid;
+        return builds.has(current) ? undefined : bid;
+      });
       if (!result.committed) {
         await releaseClaims(claimed, bid);
         return { ok: false, reason: 'occupied', bid };
@@ -705,6 +715,13 @@ export function createSession(options) {
       if (!driver) return null;
       const all = await driver.get(P.builds);
       return all ? Object.keys(all) : [];
+    },
+    // Test hook, beside the existing claimAt/rawTree ones: plant a claim that no building owns, which
+    // is the corruption a dead client leaves behind and the state that used to kill a cell for good.
+    async orphanClaim(x, z, level, fakeBid) {
+      if (!driver) return false;
+      await driver.set(joinPath(P.cells, cellClaimKey(x, z, level || 0)), String(fakeBid || 'ghost_bid'));
+      return true;
     },
     async claimAt(x, z, level) {
       if (!driver) return null;

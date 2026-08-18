@@ -42,6 +42,11 @@ export function createNetLink(world) {
   const bidOf = new Map();
 
   const original = { place: null, remove: null, removeAt: null, buyCapacity: null };
+  // buildings whose shared id is still in flight, so a delete arriving first can wait for it
+  const placing = new Map();
+  // pieces deleted while their own placement was still in flight — their late reply must not claim
+  // the shared id, because by then the echo has already built a mirror copy that owns it
+  const orphaned = new Set();
   const offs = [];
 
   // Money reconcile state. `shadow` is what the shared bank last said this client's money was;
@@ -148,15 +153,24 @@ export function createNetLink(world) {
     if (!b) return null;
     world.flow.markDirty();
 
-    session.buildings.place({
+    // Keep the RAW request, not the chain below it: the chain's handlers return nothing, so a delete
+    // waiting on it would receive `undefined` instead of the result carrying the shared id.
+    const request = session.buildings.place({
       defId: def.id,
       x: cx,
       z: cz,
       rot: r,
       price,
       cells: footprintCells(world.grid, def, cx, cz, r),
-    }).then((result) => {
+    });
+    placing.set(b, request);
+
+    request.then((result) => {
       if (result.ok) {
+        // Deleted before the reply landed: the echo has already stood a mirror copy on this ground
+        // and that copy is what the removal echo will look for. Claiming the id here would point it
+        // at this dead object instead, and the copy would stand on the grid forever.
+        if (orphaned.has(b)) { orphaned.delete(b); return; }
         // Our own entry comes back through the subscription; claim it here so the mirror does not
         // place a second copy on top of the one already standing.
         byBid.set(result.bid, b);
@@ -168,14 +182,41 @@ export function createNetLink(world) {
       if (n > 0) world.economy.counts.set(def.id, n - 1);
       world.flow.markDirty();
       world.audio?.play?.('denied');
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => { placing.delete(b); });
 
     return b;
   }
 
   function netRemove(b, opts) {
     if (opts && opts.free) return original.remove.call(world, b, opts);
-    if (!b || !bidOf.has(b)) return false;
+    if (!b) return false;
+
+    // A building placed a moment ago has no shared id yet — the id arrives with the round trip. The
+    // old code refused to remove it at all, so a quick delete silently did nothing and the player was
+    // left unable to build on ground they believed they had cleared. Take it out locally now and
+    // settle the shared side when the id lands.
+    if (!bidOf.has(b)) {
+      const inFlight = placing.get(b);
+      if (!inFlight) return false;
+      const def = b.def;
+      const back = refundFor(world.economy, def);
+      const cells = footprintCells(world.grid, def, b.cx, b.cz, b.rot);
+      const n = world.economy.counts.get(def.id) || 0;
+      if (!original.remove.call(world, b, { free: true })) return false;
+      if (n > 0) world.economy.counts.set(def.id, n - 1);
+      world.flow.markDirty();
+      orphaned.add(b);
+      inFlight.then((result) => {
+        if (!result || !result.ok || !result.bid) return;
+        // Deliberately do NOT drop the bid from the mirror here. The place echo may already have
+        // rebuilt this piece as a remote copy, and only `applyRemoteRemove` — driven by the removal
+        // echo — knows how to take that copy back out. Forgetting the bid first would strand it on
+        // the grid permanently, which is the same class of bug one layer up.
+        session.buildings.remove(result.bid, { cells, refund: back }).catch(() => {});
+      }).catch(() => {});
+      return true;
+    }
+
     const bid = bidOf.get(b);
     const def = b.def;
     const back = refundFor(world.economy, def);

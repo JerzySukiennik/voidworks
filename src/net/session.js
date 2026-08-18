@@ -414,11 +414,26 @@ export function createSession(options) {
 
   async function removeBuilding(bid, spec) {
     if (!driver || disposed || !bid) return false;
-    const entry = builds.get(bid);
-    if (!entry) return false;
-    await driver.remove(joinPath(P.builds, bid));
     const cells = (spec && spec.cells ? spec.cells : []).map((c) => cellClaimKey(c[0], c[1], c[2] || 0)).sort();
+
+    // The claims come back FIRST, and unconditionally. Two earlier bugs lived here:
+    //
+    //   1. this bailed out when `builds` did not know the bid — but `builds` is the mirror of the
+    //      shared tree, filled by the subscription echo. Deleting a building faster than its own
+    //      echo returned meant the early return ran, the cells were never released, and that ground
+    //      stayed claimed forever: the building vanished locally and nobody could ever build there again.
+    //   2. releasing after `driver.remove` meant a failed or rejected remove leaked the claims too.
+    //
+    // Releasing unconditionally is safe because `releaseClaims` only ever clears a cell that still
+    // holds OUR bid — it cannot free ground that someone else has since taken.
     await releaseClaims(cells, bid);
+
+    try {
+      await driver.remove(joinPath(P.builds, bid));
+    } catch {
+      /* the entry may already be gone; the ground is what mattered and it is free */
+    }
+
     const back = Number(spec && spec.refund) || 0;
     if (back > 0) await refund(back);
     return true;
@@ -647,6 +662,17 @@ export function createSession(options) {
     get epoch() { return epoch; },
     get seed() { return rng.seed; },
     get driverKind() { return driver ? driver.kind : null; },
+    // Test hook: the cell-claim subtree is the one piece of shared state a player can permanently
+    // corrupt, so it has to be checkable from outside rather than only inferable from symptoms.
+    async buildIds() {
+      if (!driver) return null;
+      const all = await driver.get(P.builds);
+      return all ? Object.keys(all) : [];
+    },
+    async claimAt(x, z, level) {
+      if (!driver) return null;
+      return driver.get(joinPath(P.cells, cellClaimKey(x, z, level || 0)));
+    },
     get playerCount() { return presenceRaw.size; },
     now,
     roster,

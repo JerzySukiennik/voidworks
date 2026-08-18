@@ -509,12 +509,34 @@ export async function createWorld(view, orbit) {
     return Math.floor(total / FLOW.itemSpacing);
   }
 
+  // Buildings that no longer exist under the name a save used. `belt_turn_l` / `belt_turn_r` were
+  // merged into one rotating `belt_turn`: the left variant WAS the base mesh, so it keeps its
+  // rotation, while the right variant is the same corner turned one quarter on (turnRight is d+3).
+  // Without this a pre-merge save hit the unknown id below, the WHOLE save was discarded, and the
+  // player was silently handed the menu showcase instead of their own factory.
+  const LEGACY = {
+    belt_turn_l: { id: 'belt_turn', turn: 0 },
+    belt_turn_r: { id: 'belt_turn', turn: 3 },
+    belt_sky_turn_l: { id: 'belt_sky_turn', turn: 0 },
+    belt_sky_turn_r: { id: 'belt_sky_turn', turn: 3 },
+  };
+
+  function migrate(id, rot) {
+    const m = LEGACY[id];
+    if (!m) return { id, rot };
+    return { id: m.id, rot: (((rot | 0) + m.turn) & 3) };
+  }
+
   function restore(data) {
+    let skipped = 0;
     for (const entry of data.b) {
-      const [id, cx, cz, rot] = entry;
-      if (!getDef(id)) return false;
+      const [rawId, cx, cz, rawRot] = entry;
+      const { id, rot } = migrate(rawId, rawRot);
+      // One unrecognised building must never cost the player everything else they built.
+      if (!getDef(id)) { skipped += 1; continue; }
       place(id, cx, cz, rot, { free: true });
     }
+    if (skipped) console.warn(`[voidworks] save restored with ${skipped} unknown building(s) skipped`);
     economy.applyLoaded(data);
     flow.relink();
     return buildings.size > 0;

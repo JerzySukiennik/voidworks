@@ -386,14 +386,19 @@ export function createFlow(ctx) {
   // items on the lane itself AND the parked head of every lane feeding into it, measured through the
   // join as one continuous curve. `ignore` is the lane the moving item is leaving, which must not
   // block itself. Feeder lists are one or two entries long, so this stays a handful of compares.
-  function clearanceAt(lane, t, ignore) {
+  // `ignoreFeeders` matters for one case: an actual hand-off. A rival feeder's head parked at the
+  // join sits at exactly this point, so counting it means two feeders veto each other and NOTHING
+  // can ever merge — which is precisely what a merger exists to do. At hand-off time the real
+  // constraint is spacing against the items already ON the target lane; the item being inserted
+  // becomes one of them immediately, so the next feeder is serialised correctly by the line above.
+  function clearanceAt(lane, t, ignore, ignoreFeeders) {
     let best = Infinity;
     const items = lane.items;
     for (let i = 0; i < items.length; i += 1) {
       const d = Math.abs(iT[items[i]] - t);
       if (d < best) best = d;
     }
-    const f = lane.feeders;
+    const f = ignoreFeeders ? null : lane.feeders;
     if (f) {
       for (let i = 0; i < f.length; i += 1) {
         const src = f[i].lane;
@@ -463,7 +468,7 @@ export function createFlow(ctx) {
       const j = (link.rr + k) % n;
       const c = link.lanes[j];
       if (anyLive && !c.link && !c.sink) continue;
-      if (c.sink || (clearanceAt(c, link.t0[j], from) >= FLOW.itemSpacing && !nearSibling(c, link.t0[j]))) {
+      if (c.sink || (clearanceAt(c, link.t0[j], from, true) >= FLOW.itemSpacing && !nearSibling(c, link.t0[j]))) {
         link.rr = (j + 1) % n;
         laneInsert(c, id, link.t0[j]);
         return true;
@@ -564,7 +569,14 @@ export function createFlow(ctx) {
       if (nt > len) nt = len;
       // Hold at the mouth of a crossing rather than driving through an item on the lane we yield to.
       // Only a lane that has something to yield to pays for this test.
-      if (lane.siblings && nt > old && nearSibling(lane, nt) && !nearSibling(lane, old)) nt = old;
+      // The crossing test must stop short of the exit. On a merger every arm ENDS at the same point,
+      // so near the exit each arm always sees the other arm's item, every arm parks a hair short of
+      // `len`, the hand-off at `len` never fires, and all three lock forever — the merger accepted
+      // side feeds and silently swallowed them. Convergence at the exit is already serialised by the
+      // link's own clearance test against the lane being fed, so this only guards genuine mid-lane
+      // crossings.
+      if (lane.siblings && nt > old && nt < len - FLOW.itemSpacing
+          && nearSibling(lane, nt) && !nearSibling(lane, old)) nt = old;
       // Store first, then test the crossing against the value that was actually stored. iT is a
       // Float32Array: a threshold test on the unrounded float64 can land below the trigger while the
       // rounded value lands above it, and the crossing is then never seen on any step.

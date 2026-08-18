@@ -216,7 +216,6 @@ function adder(id, name, amount, cost, unlock, cooldown, desc) {
   });
 }
 
-const CELLS_2x2 = [[0, 0], [1, 0], [0, 1], [1, 1]];
 const LIGHT = { p: [-0.3, 0.78, 0], s: [0.16, 0.16, 0.16] };
 const LIGHT_BIG = { p: [-0.34, 1.0, 0.5], s: [0.2, 0.2, 0.2] };
 
@@ -359,35 +358,36 @@ export const BUILDINGS = [
   }),
   def({
     id: 'buffer', name: 'Buffer Vault', family: 'store', cost: 1200, unlock: 1,
-    cells: CELLS_2x2,
-    desc: 'Holds up to 90 items and feeds them back out at 6/s. Stored items still count against your cap.',
-    store: { cap: 90, rate: 6 },
+    // 16 slots, not 90: at a starting cap of 100 a 90-slot vault swallowed almost the whole factory
+    // for $1200, while the real capacity upgrade buys 15 for $2000. A vault smooths a burst; it is
+    // not a way to warehouse the game.
+    desc: 'Holds up to 16 items and feeds them back out at 6/s. Stored items still count against your cap.',
+    store: { cap: 16, rate: 6 },
     lanes: [
-      ...sinkLanes(CELLS_2x2, 0.5, 0.5, 0),
-      lane([0.5, 0, 0.5, 1.5, 0, 0], 0, 0, [1, 0], [1, 0], { out: true }),
+      ...sinkLanes([[0, 0]], 0, 0, 0),
+      lane([0, 0, 0, 0.5, 0, 0], 0, 0, [0, 0], [0, 0], { out: true }),
     ],
     parts: [
-      part('box', 'steel', 0.5, 0.5, 0.5, 1.86, 1.0, 1.86),
-      part('box', 'steelDark', 0.5, 0.04, 0.5, 1.98, 0.12, 1.98),
-      part('box', 'steelLight', 0.5, 1.04, 0.5, 1.5, 0.12, 1.5),
-      part('box', 'accent', 0.5, 0.62, 1.4, 0.9, 0.5, 0.12),
+      part('box', 'steel', 0, 0.44, 0, 0.86, 0.88, 0.86),
+      part('box', 'steelDark', 0, 0.04, 0, 0.96, 0.12, 0.96),
+      part('box', 'steelLight', 0, 0.92, 0, 0.7, 0.1, 0.7),
+      part('box', 'accent', 0, 0.5, 0.44, 0.42, 0.4, 0.08),
     ],
   }),
   def({
     id: 'furnace', name: 'Fusion Furnace', family: 'store', cost: 9000, unlock: 2,
-    cells: CELLS_2x2,
     desc: 'Melts 4 items into one of the next tier up, worth 1.25x the pile — and frees 3 slots doing it.',
     fuse: { need: 4, bonus: 1.25 },
     lanes: [
-      ...sinkLanes(CELLS_2x2, 0.5, 0.5, 0),
-      lane([0.5, 0, 0.5, 1.5, 0, 0], 0, 0, [1, 0], [1, 0], { out: true }),
+      ...sinkLanes([[0, 0]], 0, 0, 0),
+      lane([0, 0, 0, 0.5, 0, 0], 0, 0, [0, 0], [0, 0], { out: true }),
     ],
     parts: [
-      part('box', 'ink', 0.5, 0.46, 0.5, 1.82, 0.92, 1.82),
-      part('box', 'steelDark', 0.5, 0.04, 0.5, 1.96, 0.12, 1.96),
-      part('cyl', 'warn', 0.5, 1.02, 0.5, 1.0, 0.22, 1.0),
-      part('cone', 'steelDark', 0.5, 1.34, 0.5, 0.8, 0.5, 0.8, 0, Math.PI),
-      part('box', 'warn', 0.5, 0.5, 1.38, 0.8, 0.44, 0.14),
+      part('box', 'ink', 0, 0.42, 0, 0.84, 0.84, 0.84),
+      part('box', 'steelDark', 0, 0.04, 0, 0.94, 0.12, 0.94),
+      part('cyl', 'warn', 0, 0.9, 0, 0.5, 0.18, 0.5),
+      part('cone', 'steelDark', 0, 1.14, 0, 0.42, 0.34, 0.42, 0, Math.PI),
+      part('box', 'warn', 0, 0.44, 0.44, 0.42, 0.36, 0.08),
     ],
   }),
 ];
@@ -412,8 +412,6 @@ const MODEL_FOR = {
   dropper_ore: 'dropper-mk2',
   dropper_deep: 'dropper-mk3',
   dropper_void: 'dropper-void',
-  buffer: 'storage',
-  furnace: 'furnace',
 };
 
 export const ITEM_MODELS = [

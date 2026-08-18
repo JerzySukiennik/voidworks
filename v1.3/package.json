@@ -1,0 +1,17 @@
+{
+  "name": "voidworks",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "serve": "node work/tools/serve.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "puppeteer": "^25.8.0"
+  }
+}

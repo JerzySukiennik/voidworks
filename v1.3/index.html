@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<!-- Voidworks — factory in a white void. Entry point: importmap, canvas, boot overlay. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voidworks</title>
+<style>
+  :root { --void: #f4f5f7; --ink: #1a1d22; --green: #17c964; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: var(--void); }
+  body { font-family: ui-rounded, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif; color: var(--ink); }
+  canvas { display: block; width: 100%; height: 100%; }
+  #boot {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 20px;
+    background: var(--void); z-index: 10; transition: opacity .7s ease;
+  }
+  #boot.hidden { opacity: 0; pointer-events: none; }
+  #boot h1 {
+    font-size: clamp(30px, 5vw, 56px); font-weight: 200; letter-spacing: .3em;
+    text-transform: uppercase; text-indent: .3em; color: var(--ink);
+  }
+  #bar { width: min(260px, 50vw); height: 2px; background: rgba(26,29,34,.12); overflow: hidden; }
+  #bar > i { display: block; height: 100%; width: 0%; background: var(--green); transition: width .3s ease; }
+  #hint { font-size: 11px; letter-spacing: .2em; text-transform: uppercase; opacity: .4; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="app"></canvas>
+<div id="boot">
+  <h1>Voidworks</h1>
+  <div id="bar"><i></i></div>
+  <div id="hint">loading</div>
+</div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

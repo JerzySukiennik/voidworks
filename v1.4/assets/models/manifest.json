@@ -1,0 +1,32 @@
+{
+  "comment": "List glb basenames (without extension) that exist in this folder; world.js loads only these, so probing never 404s.",
+  "models": [
+    "avatar-hand-l",
+    "avatar-hand-r",
+    "avatar-head",
+    "belt-curve",
+    "belt-merger",
+    "belt-ramp-down",
+    "belt-ramp-up",
+    "belt-splitter",
+    "belt-straight",
+    "dropper-basic",
+    "dropper-mk2",
+    "dropper-mk3",
+    "dropper-void",
+    "furnace",
+    "item-aurite",
+    "item-cobalt",
+    "item-copper",
+    "item-iron",
+    "item-singularite",
+    "item-slag",
+    "item-voidglass",
+    "sellpad",
+    "sellpad-tier",
+    "sorter",
+    "storage",
+    "upgrader-add",
+    "upgrader-mult"
+  ]
+}

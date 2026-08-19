@@ -203,6 +203,14 @@ function def(d) {
     speed: FLOW.beltSpeed,
     unlock: 0,
     order: ORDER++,
+    // Per-building upgrades work by handing an upgraded building its OWN derived copy of this
+    // definition (see src/sim/upgrades.js), so every stat the sim reads off `b.def` is already the
+    // effective one and the hot loop needs no per-item lookup. `payMult` is the one effective stat
+    // the catalogue did not previously carry: the sell pad's payout scale, 1 on every stock
+    // definition, raised only on a derived copy. It lives here rather than in upgrades.js so that
+    // `b.def.payMult` is a number on EVERY building, upgraded or not, and the sell path never has
+    // to test for undefined.
+    payMult: 1,
     ...d,
   };
 }

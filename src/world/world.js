@@ -11,6 +11,7 @@ import { createEconomy } from '../sim/economy.js';
 import { createTicker } from '../sim/tick.js';
 import { createPlacement } from '../build/placement.js';
 import { createOrders } from '../sim/orders.js';
+import { applyUpgradeSave, carryUpgrade, upgradeRefund } from '../sim/upgrades.js';
 
 const _p = new THREE.Vector3();
 const _s = new THREE.Vector3();
@@ -370,7 +371,7 @@ export async function createWorld(view, orbit) {
       const i = list ? list.indexOf(b) : -1;
       if (i >= 0) list.splice(i, 1);
     }
-    if (!opts || !opts.free) economy.refund(b.def);
+    if (!opts || !opts.free) { economy.refund(b.def); economy.money += upgradeRefund(b, economy); }
     partsDirty = true;
     boundsDirty = true;
     return true;
@@ -416,6 +417,13 @@ export async function createWorld(view, orbit) {
       if (back) flow.attach(back, carried);
       return null;
     }
+    // `remove(old)` above ran the paid path, so it has ALREADY handed back half the upgrade spend.
+    // That is right for a genuine swap to a different machine, and wrong for a rotate-in-place: the
+    // levels ride along to the new piece, so keeping the refund as well would pay the player for
+    // upgrades they still own — a rotate would print money. carryUpgrade returns 0 when the
+    // definition ids differ, so it selects the branch, and the same-def branch takes the refund back.
+    const refunded = upgradeRefund(old, economy);
+    if (carryUpgrade(old, b)) economy.money -= refunded;
     flow.attach(b, carried);
     return b;
   }
@@ -690,6 +698,7 @@ export async function createWorld(view, orbit) {
       place(id, cx, cz, rot, { free: true });
     }
     if (skipped) console.warn(`[voidworks] save restored with ${skipped} unknown building(s) skipped`);
+    applyUpgradeSave(data.u, buildings.values());
     economy.applyLoaded(data);
     flow.relink();
     return buildings.size > 0;

@@ -101,10 +101,23 @@ export function createPlacement(ctx) {
   const upCell = { x: 0, z: 0, wx: 0, wz: 0 };
   const ptr = { x: 0, y: 0 };
   let hasCell = false;
+  // Three separate things, deliberately not one flag:
+  //   pendingLay — the left button is down with a belt tool, but the pointer has not left the cell it
+  //                pressed on, so this gesture is still a CLICK and lays exactly one tile.
+  //   dragging   — the pointer has crossed into another cell: now it is a run, and the run planner
+  //                owns the facing of every tile so corners can auto-curve.
+  //   rightDown  — the right button is down; it becomes a camera pan the moment it moves, and an
+  //                inspect only if it never does.
+  let pendingLay = false;
   let dragging = false;
   let dragFrom = null;
+  let rightDown = false;
+  let rightMoved = false;
+  let pressX = 0;
+  let pressY = 0;
   const runCells = [];
   const listeners = [];
+  const inspectCbs = [];
 
   function makeHelper() {
     const r = BUILD.helperRadius;
@@ -215,6 +228,14 @@ export function createPlacement(ctx) {
 
   function showRun(cells) {
     const plan = world.planRun(cells, def ? def.id : 'belt');
+    // planRun derives facing from the PATH, which is right for a run and wrong for a single tile: with
+    // no previous and no next cell it has nothing to derive from and falls back to rot 0, silently
+    // throwing away the rotation the player picked with R. A one-tile run is a click, and a click's
+    // only source of facing is the ghost.
+    if (plan.length === 1 && def) {
+      plan[0].id = def.id;
+      plan[0].rot = def.rotatable ? (rot & 3) : 0;
+    }
     runCells.length = 0;
     for (let i = 0; i < markers.length; i += 1) {
       const m = markers[i];
@@ -464,12 +485,39 @@ export function createPlacement(ctx) {
 
   const active = () => !!def || deleteMode;
 
+  // --- inspect hook -----------------------------------------------------------
+  // Right-CLICK on a placed building asks for its panel. Right-DRAG is the camera's pan and always
+  // has been, so the two are told apart by how far the pointer travelled between press and release —
+  // never by the button alone. Delete does NOT live here any more: it is the X key and the trash
+  // tool, which is how the factory has always actually been torn down.
+  function onInspect(cb) {
+    if (typeof cb !== 'function') return () => {};
+    inspectCbs.push(cb);
+    return () => {
+      const i = inspectCbs.indexOf(cb);
+      if (i >= 0) inspectCbs.splice(i, 1);
+    };
+  }
+
+  // Safe with nobody listening, and one listener throwing must not eat the others or the gesture.
+  function emitInspect(b) {
+    for (let i = 0; i < inspectCbs.length; i += 1) {
+      try { inspectCbs[i](b); } catch (err) { console.warn('[placement] inspect listener failed', err); }
+    }
+  }
+
+  function movedFar(e) {
+    return Math.hypot(e.clientX - pressX, e.clientY - pressY) > BUILD.clickSlop;
+  }
+
   // The camera owns left-drag; it hands it over while a build tool is up rather than us fighting it.
-  if (orbit && orbit.setDragBlocker) orbit.setDragBlocker((e) => active() && (!e || e.button === 0 || e.button === 2));
+  // Right-drag is NEVER blocked — panning with it is the existing camera contract.
+  if (orbit && orbit.setDragBlocker) orbit.setDragBlocker((e) => active() && (!e || e.button === 0));
 
   on(window, 'pointermove', (e) => {
     ptr.x = e.clientX;
     ptr.y = e.clientY;
+    if (rightDown && !rightMoved && movedFar(e)) rightMoved = true;
     // The hovered cell is tracked even with no build tool selected: F retargets whatever machine is
     // under the pointer, and requiring a tool in hand to change a sorter's material would be absurd.
     // One ray-plane intersection per pointer move — the same one the ghost already pays for.
@@ -477,30 +525,44 @@ export function createPlacement(ctx) {
     hasCell = !!hit;
     if (!active()) return;
     refreshValidity();
+    // The gesture graduates from click to drag the moment it reaches a different cell — that is
+    // exactly when a path exists to derive facings from, and not one pointermove sooner.
+    if (pendingLay && !dragging && dragFrom && (cell.x !== dragFrom.x || cell.z !== dragFrom.z)) dragging = true;
     if (dragging && dragFrom && def && def.family === 'belt') showRun(planPath(dragFrom, cell));
     updateGhost();
   }, true);
 
   on(window, 'pointerdown', (e) => {
-    if (!active()) return;
     if (e.target !== dom) return;
+    // Right press is tracked whether or not a build tool is up: inspecting a machine must not require
+    // holding one. It swallows nothing, so the camera still receives it and can pan.
+    if (e.button === 2) {
+      rightDown = true;
+      rightMoved = false;
+      pressX = e.clientX;
+      pressY = e.clientY;
+      ptr.x = e.clientX;
+      ptr.y = e.clientY;
+      hasCell = !!pickCell(e.clientX, e.clientY, cell, level());
+      return;
+    }
+    if (!active()) return;
     ptr.x = e.clientX;
     ptr.y = e.clientY;
     hasCell = !!pickCell(e.clientX, e.clientY, cell, level());
     if (!hasCell) return;
-    if (e.button === 2) {
-      e.preventDefault();
-      e.stopPropagation();
-      deleteHere();
-      return;
-    }
     if (e.button !== 0) return;
     e.stopPropagation();
     if (deleteMode) { deleteHere(); return; }
     if (BUILD.dragLay && def.family === 'belt' && !def.noDrag) {
-      dragging = true;
+      // Armed, not yet dragging: the ghost stays up showing the chosen facing, and no run markers
+      // appear until the gesture actually becomes a run.
+      pendingLay = true;
+      dragging = false;
       dragFrom = { x: cell.x, z: cell.z };
-      showRun([[cell.x, cell.z]]);
+      pressX = e.clientX;
+      pressY = e.clientY;
+      refreshValidity();
       updateGhost();
       return;
     }
@@ -512,8 +574,38 @@ export function createPlacement(ctx) {
   }, true);
 
   on(window, 'pointerup', (e) => {
+    if (e.button === 2) {
+      if (!rightDown) return;
+      rightDown = false;
+      // It panned the camera. A pan is not a request to open anything.
+      if (rightMoved || movedFar(e)) { rightMoved = false; return; }
+      ptr.x = e.clientX;
+      ptr.y = e.clientY;
+      hasCell = !!pickCell(e.clientX, e.clientY, cell, level());
+      const target = hasCell ? deleteTarget() : null;
+      // Empty space opens nothing — a panel that pops up over the void is noise, not information.
+      if (target) emitInspect(target);
+      return;
+    }
+    if (pendingLay && !dragging) {
+      // One click, one tile, the player's own rotation — routed through placeHere so a click onto an
+      // existing belt still swaps in place (which is how rotate-in-place works) and still records a
+      // single undoable action.
+      pendingLay = false;
+      dragFrom = null;
+      e.stopPropagation();
+      hasCell = !!pickCell(e.clientX, e.clientY, cell, level());
+      hideRun();
+      refreshValidity();
+      if (valid) placeHere();
+      else sfx('denied', cell.x, cell.z);
+      refreshValidity();
+      updateGhost();
+      return;
+    }
     if (!dragging) return;
     dragging = false;
+    pendingLay = false;
     dragFrom = null;
     e.stopPropagation();
     commitRun();
@@ -521,7 +613,8 @@ export function createPlacement(ctx) {
     updateGhost();
   }, true);
 
-  on(dom, 'contextmenu', (e) => { if (active()) e.preventDefault(); });
+  // The canvas never shows the browser menu: right-click is a game gesture here in every mode.
+  on(dom, 'contextmenu', (e) => e.preventDefault());
 
   // Typing a name into the co-op form must never build, rotate or rewind the factory.
   function typing(e) {
@@ -569,6 +662,9 @@ export function createPlacement(ctx) {
     paneColorFor,
     // The machine under the pointer, or null. The buildbar/HUD need it to draw the filter readout.
     hovered: () => (hasCell ? deleteTarget() : null),
+    // Right-click on a placed building. cb(building) — the same object world.buildings holds, so the
+    // panel can read def/rot/cx/cz/filterTier off it directly. Returns an unsubscribe function.
+    onInspect,
     cycleFilter: (b, dir) => world.flow.cycleFilter(b, dir),
     undo,
     canUndo: () => undoStack.length > 0 && !coopBlocked(),

@@ -555,7 +555,7 @@ export function createFlow(ctx) {
         matched = t === filterOf(b);
         mult = matched ? SELLPAD.matchMult : SELLPAD.missMult;
       }
-      const paid = economy.sell(iValue[id] * mult);
+      const paid = economy.sell(iValue[id] * mult * (b.def.payMult || 1));
       b.flash = 1;
       if (ctx.onSell) ctx.onSell(b, paid, t);
       // Only a MATCHED delivery into a tier pad counts toward an order. A plain pad contributes

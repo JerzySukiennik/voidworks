@@ -1,5 +1,6 @@
 // Voidworks — money, sell crediting, upgrader value maths, the price curve and localStorage saves.
 
+import { upgradeSnapshot } from './upgrades.js';
 import { ECONOMY, PRESTIGE, UNLOCKS } from '../config.js';
 import { clampTier, baseValue, TOP_TIER } from '../world/items.js';
 import {
@@ -267,6 +268,7 @@ export function createEconomy() {
         pp: points,
         pc: prestiges,
         b: buildings.map((b) => [b.def.id, b.cx, b.cz, b.rot]),
+        u: upgradeSnapshot(buildings),
       };
     },
 

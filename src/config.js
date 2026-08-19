@@ -275,6 +275,10 @@ export const BUILD = {
   dragLay: true,
   levelRise: 0.52,
 
+  // Pixels of travel that separate a click from a drag. A right-click under this opens the inspector;
+  // over it, the gesture belonged to the camera and opens nothing.
+  clickSlop: 6,
+
   // The hologram's direction arrow. It is built from the building's own item path, so it curves on a
   // curve and climbs on a ramp — and it exists ONLY in the hologram, never on a placed building.
   arrowLift: 0.5,
@@ -953,4 +957,227 @@ export const FX = {
   // ITEMS.tiers[].color is written back from the authored glb materials at load, so the config,
   // the UI chips and the meshes can never drift apart again the way they had.
   syncTierColours: true,
+};
+
+// --- owned by: inspector ------------------------------------------------------
+// The panel that opens in the top-right when you right-click a placed building. It is a READOUT
+// first and a shop second: the same numbers the buildbar prints while you are shopping, now for the
+// thing you already own, plus whatever the upgrade system offers for it.
+//
+// Colours are deliberately NOT redefined here — the panel imports BUILDBAR.colors so the buildbar
+// and the inspector can never drift into being two designers' work. Only geometry, timing and copy
+// live in this section.
+export const INSPECTOR = {
+  z: 7,
+  // Below the buildbar's detail popover (BUILDBAR.z + 1 = 6) is wrong — this panel must survive a
+  // hover elsewhere — and above the front screens (z 8) would print it over the main menu.
+  width: 300,
+  top: 16,
+  right: 16,
+  // At 1280x800 the panel is 300 wide on the right edge and the buildbar is 1180 centred at the
+  // bottom; a cap here keeps a long upgrade list from growing down into it.
+  maxHeightVh: 62,
+
+  // Same poll cadence as the buildbar. Nothing in here is animated per frame; the panel writes to
+  // the DOM only when a value it is displaying actually changed.
+  pollSeconds: 0.2,
+
+  // A right-DRAG is how the camera pans, so a right press that MOVED is never a click. Both gates
+  // must pass. Only used by the inspector's own fallback listener — when placement.js exposes the
+  // real right-click hook it owns this decision instead.
+  clickSlopPx: 5,
+  clickHoldMs: 400,
+
+  copy: {
+    title: 'Building',
+    close: 'Close',
+    upgrades: 'Upgrades',
+    level: 'Level',
+    next: 'Next',
+    buy: 'Upgrade',
+    maxed: 'Fully upgraded',
+    none: 'No upgrades for this building',
+    poor: 'Not enough money',
+    effect: 'Effect',
+    throughput: 'Speed',
+    refund: 'Sells back',
+    cell: 'Cell',
+    status: 'Status',
+    material: 'Material',
+    materialHint: 'F to change',
+    running: 'Running',
+    stalled: 'Stalled',
+    held: 'Held',
+    hint: 'Esc to close',
+  },
+};
+
+// --- owned by: hud / buildbar (surfacing the finished-but-unreachable systems) --
+// Five systems shipped with working engines and no way in: the sorter's filter, prestige, orders,
+// the away summary and unlock gating. Everything in this block is about how LITTLE room each is
+// allowed to take. Two rules held throughout, and they are the reason there is no fifth panel:
+//
+//   1. Nothing here paints a surface while it has nothing to say. The filter strip exists only
+//      while a filterable machine is under the pointer; the prestige line only while a reset is
+//      actually available (or has just been refused); the away line once, then never again.
+//   2. Anything with a permanent home goes where the player is already looking — the HUD column
+//      or a buildbar tile — rather than claiming a new corner. Orders are the single exception,
+//      and they are one dim label and two rows, drawn without a panel behind them.
+export const SURFACE = {
+  // Poll rates, in seconds. NOTHING in this block writes the DOM from a frame: every piece polls on
+  // its own clock and writes only when the string it would print has actually changed.
+  hudPoll: 0.4,
+  ordersPoll: 0.25,
+  filterPoll: 0.1,
+
+  // The sorter / Contract Pad material strip. Contextual: hover a filterable machine and it fades
+  // in above the buildbar, showing the seven materials with the current one ringed. Clicking a
+  // swatch sets it; the strip also names the F hotkey, which existed but was undiscoverable.
+  filter: {
+    // Clears the buildbar: bar bottom 16 + shelf 108 + gap 6 + rack 40 = 170.
+    bottom: 184,
+    // Seconds the strip stays after the pointer leaves the machine. Without a hold you could never
+    // reach the strip with the cursor — walking off the machine is how you get to it.
+    hold: 2.4,
+    swatch: 16,
+  },
+
+  // Orders. Top-left, no panel, no border, no shadow: one dim caption and one row per live slot.
+  orders: {
+    top: 22,
+    left: 22,
+    rail: 104,
+    // How long a filled/expired order's result line lingers before the list goes quiet again.
+    flashSeconds: 3.6,
+  },
+
+  // Prestige has NO permanent control anywhere, on purpose. It is available perhaps once an hour,
+  // and a button that is dead 99% of the time is worse than no button: it teaches the player to
+  // stop reading that spot. It appears as one line under the money the moment `canPrestige()` turns
+  // true, and disappears again the moment it is spent.
+  prestige: {
+    // Seconds the co-op refusal stays on screen after a click. Long enough to read, then gone —
+    // the feature is not hidden, it is answered.
+    refusalSeconds: 4.5,
+  },
+
+  // The away summary: shown once on return, dismissible, and gone for good afterwards.
+  away: {
+    seconds: 16,
+  },
+
+  colors: {
+    panel: 'rgba(255,255,255,.90)',
+    panelEdge: 'rgba(26,29,34,.13)',
+    ink: '#12151a',
+    text: '#3b414b',
+    dim: '#98a0ac',
+    faint: 'rgba(26,29,34,.08)',
+    accent: '#17c964',
+    accentDeep: '#0e9f4c',
+    warn: '#c07d0e',
+    lock: '#9aa3b0',
+  },
+
+  copy: {
+    filterHint: 'F',
+    ordersTitle: 'Orders',
+    ordersNone: 'no contracts',
+    prestige: 'reset for',
+    prestigePoint: 'point',
+    prestigePoints: 'points',
+    prestigeCoop: 'prestige is singleplayer only',
+    awayCapped: 'your line was at the cap — more belt, not more droppers',
+    awayIdle: 'nothing was running while you were away',
+    locked: 'locked',
+    lockedAt: 'unlocks at',
+    lockedLifetime: 'lifetime earned',
+    // The tile foot is 86px wide and already carries the figure; the full phrase does not fit next
+    // to it and clipped to "00k LIFETIME EARL" in the 1600x1000 shot. The sentence version above is
+    // what the hover card and the rack caption use, where there is room to say it properly.
+    lockedShort: 'lifetime',
+  },
+};
+
+// --- owned by: economy / per-building upgrades ---------------------------------
+// An individual PLACED machine can be levelled up a few times. Three levels, never more: "parę
+// upgradów" is a handful of decisions about one machine, not a second progression system running
+// alongside prestige and unlocks.
+//
+// Every number below is chosen against ONE constraint — the hard cap on items in circulation
+// (ECONOMY.capacityStart..capacityMax). Under a cap the factory's income is
+//
+//     income  =  (items in flight / transit time) * value per item
+//
+// so a slot is the scarce resource and the only two things worth buying are VALUE PER SLOT and
+// SHORTER TRANSIT. That splits the five families cleanly, and the cost curves are set so that
+// neither "level this machine up" nor "buy another machine" wins at every stage:
+//
+//   dropper   raises what a slot is FILLED WITH (better material odds, never raw rate while there
+//             is still a tier to unlock). Strongest possible effect, so it is gated by the unlock
+//             ladder as well as by price: a dropper may never out-roll the best dropper the player
+//             has unlocked by more than one tier.
+//   upgrader  raises value per slot directly. Level 1 is deliberately priced level with buying a
+//             second gate; levels 2 and 3 decay hard, so chaining machines stays the money-optimal
+//             play and upgrading is what you do when you are out of BELT, not out of money.
+//   belt      raises speed, i.e. shortens transit. Genuinely weak, because one tile is one tile of
+//             a long run — and that is the honest shape of a speed upgrade under a cap. Priced cheap.
+//   sell      raises payout: the purest value-per-slot buy in the game, and the most expensive.
+//   store     vault = more parking and faster release (throughput, therefore weak);
+//             furnace = a bigger fusion bonus, which is value per slot AND slot compression at once.
+//
+// Cost of buying level L (1-based) on a placed machine:
+//     round( economy.priceOf(that machine) * base * growth^(L-1) )
+// Pinned to what ANOTHER copy of the same machine costs right now — including the 1.06^n price
+// curve — so "upgrade or build another one" stays the same comparison at every size of factory
+// instead of drifting in favour of upgrades as the catalogue price runs away.
+export const UPGRADES = {
+  maxLevel: 3,
+
+  cost: {
+    dropper: { base: 1.8, growth: 2.4 },
+    belt: { base: 4.0, growth: 2.2 },
+    upgrader: { base: 0.55, growth: 2.4 },
+    sell: { base: 6.0, growth: 3.0 },
+    store: { base: 2.0, growth: 2.2 },
+    furnace: { base: 1.5, growth: 2.5 },
+  },
+
+  // Belt: +35% speed per level (x2.46 at level 3). Note this cuts both ways on purpose — a faster
+  // tile also gives an item less time to clear an upgrader's per-item cooldown, so a speed-maxed
+  // run through a dense gate line can sell MORE items each worth LESS.
+  beltSpeedStep: 1.35,
+
+  // Adders scale their flat amount; multipliers scale their GAIN (amount - 1), because scaling the
+  // amount itself would make a x1.25 buffer wheel and a x10 gate improve by wildly different
+  // fractions of what they actually do.
+  flatStep: 1.55,
+  multStep: 1.8,
+
+  // Only reached once a dropper has no material tier left to gain. Rate is near-worthless at the
+  // cap, which is exactly why it is the LAST thing a dropper level can give you.
+  dropRateStep: 1.3,
+
+  // Sell pad payout, applied to the value handed to the bank. Multiplicative with the Contract
+  // Pad's match/miss scaling and with the prestige multiplier, all of which are downstream of the
+  // cap and therefore cannot compound against item count.
+  payStep: 1.15,
+
+  // Vault: eight more parking slots and three more items a second, per level.
+  vaultCapStep: 8,
+  vaultRateStep: 3,
+
+  // Furnace: +16% on the fusion bonus per level (1.25 -> 1.95 at level 3).
+  fuseBonusStep: 1.16,
+
+  // A tier gate (Transmuter) has no amount to scale, so its levels buy the two things it does have:
+  // level 1 drops `once`, which lets it raise the same item again on a looped line, and every level
+  // halves the cooldown. On a single straight run this is the weakest upgrade in the game and the
+  // panel says so in as many words — it is a layout upgrade, not a stat upgrade.
+  tierCooldownStep: 0.5,
+
+  // What tearing out an upgraded machine hands back, as a share of what its levels cost. Same 0.5
+  // as ECONOMY.refund, deliberately: an upgrade is a purchase attached to a building, not a
+  // separate currency with its own rules.
+  refund: 0.5,
 };

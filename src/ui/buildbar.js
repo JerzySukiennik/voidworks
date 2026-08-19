@@ -1,6 +1,6 @@
 // Voidworks — the build catalogue: grouped tiles that teach the upgrader colour system while you shop.
 
-import { BUILDBAR, ITEMS } from '../config.js';
+import { BUILDBAR, ITEMS, SURFACE } from '../config.js';
 import { paneColorFor } from '../world/buildings.js';
 import { iconFor, groupGlyph, trashGlyph } from './buildbar-icons.js';
 
@@ -27,6 +27,20 @@ const CSS = `
 .vw-tile.poor{opacity:.46}
 .vw-tile.poor:hover{opacity:.82}
 .vw-tile.on{background:#fff;border-color:${C.accent};box-shadow:0 0 0 2px rgba(23,201,100,.28);opacity:1}
+/* Locked is a DIFFERENT state from poor, and has to look like one: "poor" is a price you are saving
+   toward and the tile fills a bar as you get there, "locked" is a door that money in hand cannot
+   open. Same dimming would have read as the same problem. */
+.vw-tile.locked{opacity:.5;cursor:default;background:repeating-linear-gradient(135deg,
+  rgba(26,29,34,.030) 0 5px,transparent 5px 10px),${C.tile}}
+.vw-tile.locked:hover{opacity:.72;transform:none;border-color:${C.tileEdge};background:repeating-linear-gradient(135deg,
+  rgba(26,29,34,.030) 0 5px,transparent 5px 10px),${C.tile}}
+.vw-tile.locked .vw-tile-art,.vw-tile.locked .vw-tile-eff{filter:grayscale(1);opacity:.55}
+.vw-tile.locked .vw-tile-cost{color:${SURFACE.colors.lock};font-weight:600;font-size:10.5px}
+.vw-tile.locked .vw-tile-note{color:${SURFACE.colors.lock};font-size:7px}
+.vw-tile-lock{position:absolute;top:3px;right:5px;line-height:1;color:${SURFACE.colors.lock};display:none}
+.vw-tile-lock svg{width:9px;height:11px;display:block}
+.vw-tile.locked .vw-tile-lock{display:block}
+.vw-tile.locked .vw-tile-fp{display:none}
 .vw-tile-key{position:absolute;top:4px;left:6px;font-size:9px;font-weight:700;color:${C.dim};line-height:1}
 .vw-tile.on .vw-tile-key{color:${C.accentDeep}}
 .vw-tile-fp{position:absolute;top:4px;right:6px;font-size:8.5px;font-weight:700;letter-spacing:.04em;color:${C.dim};line-height:1}
@@ -39,7 +53,7 @@ const CSS = `
   overflow:hidden;text-overflow:ellipsis}
 /* Price and the small caveat share one line: a caveat is always about the price you are paying. */
 .vw-tile-foot{margin-top:auto;padding-top:3px;display:flex;align-items:center;justify-content:center;
-  gap:5px;width:100%;height:14px}
+  gap:5px;width:100%;height:14px;overflow:hidden}
 .vw-tile-cost{font-size:11.5px;font-weight:600;color:${C.text};font-feature-settings:"tnum" 1;line-height:1}
 .vw-tile.poor .vw-tile-cost{color:${C.dim};font-weight:500}
 .vw-tile-note{display:flex;gap:3px;align-items:center;font-size:7.5px;font-weight:700;letter-spacing:.06em;
@@ -98,6 +112,9 @@ const CSS = `
 .vw-detail-dot{width:9px;height:9px;border-radius:3px;flex:none;align-self:center}
 .vw-detail-name{font-size:14px;font-weight:700;color:${C.ink};letter-spacing:-.01em}
 .vw-detail-cost{margin-left:auto;font-size:13px;font-weight:700;font-feature-settings:"tnum" 1}
+.vw-detail-lock{margin-top:9px;padding:6px 8px;border-radius:8px;background:rgba(26,29,34,.05);
+  font-size:10.5px;line-height:1.35;color:${C.text}}
+.vw-detail-lock b{color:${C.ink};font-weight:700}
 .vw-detail-fam{margin-top:3px;font-size:9.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:${C.dim}}
 .vw-detail-desc{margin-top:8px;font-size:11.5px;line-height:1.45;color:${C.text}}
 .vw-detail-grid{margin-top:10px;padding-top:9px;border-top:1px solid ${C.faint};display:grid;
@@ -200,6 +217,12 @@ function familyOf(def) {
   return 'Terminal · end of line';
 }
 
+// A padlock, not an emoji: the bar is drawn in one grey and an emoji lock would be the only
+// full-colour object in it.
+const LOCK_GLYPH = '<svg viewBox="0 0 9 11" fill="none" xmlns="http://www.w3.org/2000/svg">'
+  + '<rect x=".6" y="4.4" width="7.8" height="6" rx="1.4" fill="currentColor"/>'
+  + '<path d="M2.5 4.4V3a2 2 0 0 1 4 0v1.4" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>';
+
 function groupIdOf(def) {
   if (def.family === 'upgrader') return def.kind === 'add' ? 'add' : 'mult';
   if (def.family === 'dropper') return 'dropper';
@@ -214,6 +237,17 @@ export function createBuildbar(world) {
   const shelf = el('div', 'vw-shelf', root);
   const rack = el('div', 'vw-rack', root);
   const detail = el('div', 'vw-detail', document.body);
+
+  // --- unlock gating ----------------------------------------------------------
+  // The economy already refuses to charge for a locked building; until now that refusal was silent
+  // and read as a bug. Everything below is about turning it into a sentence: WHAT is locked, and
+  // exactly WHAT it is waiting for. Nothing here takes any extra room — the lock rides in the tile
+  // the building already had, and its requirement replaces the price it cannot be bought at.
+  const eco = world.economy;
+  const unlocked = (def) => !eco || !eco.isUnlocked || eco.isUnlocked(def);
+  const lockCost = (def) => (eco && eco.unlockCost ? eco.unlockCost(def.unlock | 0) : 0);
+  const lockHint = (def) => `<b>${def.name} is ${SURFACE.copy.locked}.</b> ${SURFACE.copy.lockedAt} `
+    + `${money(lockCost(def))} ${SURFACE.copy.lockedLifetime} — you have ${money(eco.lifetimeEarned)}.`;
 
   // Cost order is the progression ladder, and for the ramp entries it is also the colour ramp — so the
   // two off-ramp machines (gold tier, red gamble) are pushed past a divider instead of breaking it.
@@ -278,6 +312,7 @@ export function createBuildbar(world) {
       const node = el('div', 'vw-tile', shelf);
       el('div', 'vw-tile-key', node, String(i + 1));
       if (def.cells.length > 1) el('div', 'vw-tile-fp', node, '2×2');
+      el('div', 'vw-tile-lock', node, LOCK_GLYPH);
       el('div', 'vw-tile-art', node, iconFor(def, color));
       const eff = el('div', 'vw-tile-eff', node, effectOf(def));
       if (def.family === 'upgrader') eff.style.color = readable(color);
@@ -301,9 +336,15 @@ export function createBuildbar(world) {
       const bar = el('div', 'vw-tile-bar', el('div', 'vw-tile-track', node));
 
       node.addEventListener('click', () => pick(def.id));
-      node.addEventListener('mouseenter', () => showDetail(def, node, color));
-      node.addEventListener('mouseleave', () => hideDetail(def));
-      tiles.set(def.id, { def, node, cost, bar, state: null, fill: -1 });
+      node.addEventListener('mouseenter', () => {
+        showDetail(def, node, color);
+        if (!unlocked(def)) hint.innerHTML = lockHint(def);
+      });
+      node.addEventListener('mouseleave', () => {
+        hideDetail(def);
+        if (!unlocked(def)) hint.innerHTML = groupHint(current());
+      });
+      tiles.set(def.id, { def, node, cost, note, bar, state: null, fill: -1, noteWas: note.innerHTML });
     });
   }
 
@@ -338,6 +379,15 @@ export function createBuildbar(world) {
   }
 
   function pick(id) {
+    // A locked building is one you cannot BUY (see economy.charge), so the bar refuses it here
+    // rather than letting the player select a ghost that will be rejected on click with no reason
+    // given. The tile already prints what it is waiting for.
+    const t = tiles.get(id);
+    if (t && !unlocked(t.def)) {
+      world.audio?.play?.('denied');
+      hint.innerHTML = lockHint(t.def);
+      return;
+    }
     deleting = false;
     world.select(selected === id ? null : id);
     syncSelection(true);
@@ -364,17 +414,25 @@ export function createBuildbar(world) {
     const cash = world.money;
     for (const t of tiles.values()) {
       const price = world.priceOf(t.def.id);
-      const afford = cash >= price;
-      const sig = `${afford ? 1 : 0}|${price}`;
+      const open = unlocked(t.def);
+      const afford = open && cash >= price;
+      const sig = `${open ? 1 : 0}|${afford ? 1 : 0}|${price}`;
       if (force || sig !== t.state) {
         t.state = sig;
-        t.cost.textContent = shortMoney(price);
-        t.node.classList.toggle('poor', !afford);
+        // A locked tile prints the threshold it is waiting on INSTEAD of the price, because the
+        // price is not the thing standing in the way and showing it would be a lie about why the
+        // tile is dim. The note slot under it carries the unit the number is in.
+        t.cost.textContent = open ? shortMoney(price) : shortMoney(lockCost(t.def));
+        if (open) t.note.innerHTML = t.noteWas;
+        else t.note.textContent = SURFACE.copy.lockedShort;
+        t.note.style.color = open ? '' : SURFACE.colors.lock;
+        t.node.classList.toggle('locked', !open);
+        t.node.classList.toggle('poor', open && !afford);
       }
-      const fill = afford ? 100 : Math.round((cash / price) * 100);
+      const fill = !open ? 0 : (afford ? 100 : Math.round((cash / price) * 100));
       if (force || Math.abs(fill - t.fill) >= 2) {
         t.fill = fill;
-        t.bar.style.width = afford ? '0%' : `${fill}%`;
+        t.bar.style.width = afford || !open ? '0%' : `${fill}%`;
       }
     }
   }
@@ -384,7 +442,8 @@ export function createBuildbar(world) {
   function showDetail(def, node, color) {
     hovered = def.id;
     const price = world.priceOf(def.id);
-    const afford = world.money >= price;
+    const open = unlocked(def);
+    const afford = open && world.money >= price;
     const rows = [
       [COPY.effect, longEffectOf(def)],
       [COPY.cost, money(price)],
@@ -397,6 +456,7 @@ export function createBuildbar(world) {
       + `<div class="vw-detail-cost" style="color:${afford ? C.accentDeep : C.dim}">${money(price)}</div></div>`
       + `<div class="vw-detail-fam">${familyOf(def)}</div>`
       + `<div class="vw-detail-desc">${def.desc}</div>`
+      + (open ? '' : `<div class="vw-detail-lock">${lockHint(def)}</div>`)
       + `<div class="vw-detail-grid">${rows.map(([k, v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('')}</div>`;
     const r = node.getBoundingClientRect();
     const w = 288;

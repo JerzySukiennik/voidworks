@@ -9,6 +9,8 @@ import { createHud } from './ui/hud.js';
 import { createMenu } from './ui/menu.js';
 import { createAudio } from './audio/audio.js';
 import { createBuildbar } from './ui/buildbar.js';
+import { createInspector } from './ui/inspector.js';
+import * as upgrades from './sim/upgrades.js';
 import { createNetLink } from './net/net.js';
 
 const canvas = document.getElementById('app');
@@ -39,6 +41,15 @@ world.audio = createAudio();
 world.audio.setListener(view.camera);
 
 const buildbar = createBuildbar(world);
+
+// Two builders described this hook from opposite ends: placement exposes a SUBSCRIBE function,
+// the panel wants to be TOLD. Neither is wrong, so the join happens here rather than by making
+// one of them rewrite the other's file.
+// `hooked: true` retires the panel's own fallback listener up front. Without it BOTH paths handle the
+// same right-click — placement opens the panel, the fallback's click-away closes it in the same
+// gesture — and the panel flickers shut. It took the inspector suite dropping 33/33 to 18/33 to show it.
+const inspector = createInspector(world, { hooked: true, upgrades });
+world.placement?.onInspect?.((b) => inspector.inspect(b));
 
 world.net = createNetLink(world);
 addEventListener('pagehide', () => world.net.leave());
@@ -83,6 +94,7 @@ function frame() {
   world.audio.update(dt);
   hud.update(dt);
   buildbar.update(dt);
+  inspector.update(dt);
   view.render(dt);
 }
 frame();
@@ -96,6 +108,7 @@ window.vw = {
   world,
   hud,
   buildbar,
+  inspector,
   menu,
   debug: {
     spawn(n) {

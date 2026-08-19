@@ -11,7 +11,7 @@ import { createEconomy } from '../sim/economy.js';
 import { createTicker } from '../sim/tick.js';
 import { createPlacement } from '../build/placement.js';
 import { createOrders } from '../sim/orders.js';
-import { applyUpgradeSave, carryUpgrade, upgradeRefund } from '../sim/upgrades.js';
+import { applyUpgradeSave, carryUpgrade, upgradeRefund, onUpgradeApplied, setUpgradeLevel, upgradeLevels } from '../sim/upgrades.js';
 
 const _p = new THREE.Vector3();
 const _s = new THREE.Vector3();
@@ -853,9 +853,30 @@ flow.setDeliverHook(orders);
     return fxOn;
   }
 
+  // --- what co-op has to mirror -----------------------------------------------
+  // The network layer imports nothing from here on purpose (it also runs headless), so the three
+  // calls it needs live on this side, where the upgrade ladder and the building flags already are.
+  function netState(b) {
+    if (isSwitch(b.def)) return flow.switchOf(b);
+    if (hasFilter(b.def)) return b.filterTier;
+    return undefined;
+  }
+
+  function applyNetState(b, state, level) {
+    if (state !== undefined) {
+      if (isSwitch(b.def)) flow.setSwitch(b, state);
+      else if (hasFilter(b.def)) flow.setFilter(b, state);
+    }
+    if (level !== undefined && upgradeLevels(b) !== level) setUpgradeLevel(b, level);
+  }
+
   const api = {
     root,
     grid,
+    netState,
+    applyNetState,
+    netLevel: upgradeLevels,
+    onUpgradeApplied,
     economy,
     flow,
     buildings,

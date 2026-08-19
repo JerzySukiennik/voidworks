@@ -431,14 +431,20 @@ export function createSession(options) {
       await releaseClaims(claimed, bid);
       return { ok: false, reason: 'poor', bid };
     }
-    await driver.set(joinPath(P.builds, bid), {
+    // `s` and `l` are the two things a player sets AFTER placing: a Switch's live arm (or a pad's
+    // material) and an upgrade level. Written only when they are non-default, so an ordinary belt
+    // stays the same four-field record it has always been.
+    const payload = {
       d: String(spec.defId),
       x: spec.x | 0,
       z: spec.z | 0,
       r: (spec.rot | 0) & 3,
       u: uid,
       t: now(),
-    });
+    };
+    if (spec.state) payload.s = spec.state | 0;
+    if (spec.level) payload.l = spec.level | 0;
+    await driver.set(joinPath(P.builds, bid), payload);
     return { ok: true, bid };
   }
 
@@ -480,6 +486,8 @@ export function createSession(options) {
       by: String(value.u || ''),
       mine: value.u === uid,
       at: Number(value.t) || 0,
+      state: value.s === undefined ? undefined : value.s | 0,
+      level: value.l === undefined ? undefined : value.l | 0,
     };
     const had = builds.has(bid);
     builds.set(bid, entry);
@@ -763,6 +771,12 @@ export function createSession(options) {
       all: builds,
       place: placeBuilding,
       remove: removeBuilding,
+      // Patch ONE field of an existing build rather than re-setting the record: two players toggling
+      // different switches in the same second would otherwise overwrite each other's whole entry.
+      setState(bid, patch) {
+        if (!bid || !patch) return Promise.resolve(false);
+        return driver.update(joinPath(P.builds, bid), patch).then(() => true).catch(() => false);
+      },
       onChange(cb) {
         return on(listeners.build, cb, (fn) => {
           for (const entry of builds.values()) fn('add', entry);

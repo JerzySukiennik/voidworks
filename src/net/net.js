@@ -99,6 +99,29 @@ export function createNetLink(world) {
   // sit in it being retried every single frame for as long as the room is open.
   const unknown = new Set();
 
+  // What "hand-set state" means for a building is the WORLD's business, not the network's: this
+  // module deliberately imports nothing from the renderer or the upgrade ladder, because co-op also
+  // runs headless against a fake world with no three.js in it. Both calls are optional, so a harness
+  // that does not implement them simply does not mirror state.
+  function stateOf(b) {
+    return world.netState ? world.netState(b) : undefined;
+  }
+
+  function applyRemoteState(entry) {
+    const b = byBid.get(entry.bid);
+    if (!b || !world.applyNetState) return;
+    world.applyNetState(b, entry.state, entry.level);
+    world.flow.markDirty();
+  }
+
+  // Pushing a change is fire-and-forget on purpose: a dropped patch costs one out-of-sync switch,
+  // and blocking a click on a network round trip would cost every click.
+  function pushState(b, patch) {
+    const bid = bidOf.get(b);
+    if (!bid || !session || !session.buildings.setState) return;
+    session.buildings.setState(bid, patch);
+  }
+
   function applyRemoteBuild(entry) {
     if (byBid.has(entry.bid)) return true;
     if (unknown.has(entry.bid)) return false;
@@ -309,6 +332,8 @@ export function createNetLink(world) {
           z: b.cz,
           rot: b.rot,
           price: 0,
+          state: stateOf(b),
+          level: world.netLevel ? world.netLevel(b) : undefined,
           cells: footprintCells(world.grid, b.def, b.cx, b.cz, b.rot),
         }).catch(() => {});
       }
@@ -359,9 +384,22 @@ export function createNetLink(world) {
 
     offs.push(session.bank.onChange(onBank));
     offs.push(session.buildings.onChange((kind, entry) => {
-      if (kind === 'add') applyRemoteBuild(entry);
+      if (kind === 'add') { if (applyRemoteBuild(entry)) applyRemoteState(entry); }
+      else if (kind === 'change') applyRemoteState(entry);
       else if (kind === 'remove') applyRemoteRemove(entry);
     }));
+
+    // Local changes going the other way. Both are safe from echo: applying a REMOTE change calls
+    // flow.setSwitch / setUpgradeLevel, and neither of those announces — only the input paths do.
+    const prevSwitchHook = world.onSwitchChanged;
+    // Chained, not assigned: the build layer hangs its marker repaint on this same hook, and
+    // replacing it would leave a thrown switch pointing the old way on the thrower's own screen.
+    world.onSwitchChanged = (b, arm) => {
+      if (typeof prevSwitchHook === 'function') prevSwitchHook(b, arm);
+      pushState(b, { s: arm | 0 });
+    };
+    offs.push(() => { world.onSwitchChanged = prevSwitchHook; });
+    if (world.onUpgradeApplied) offs.push(world.onUpgradeApplied((b, level) => pushState(b, { l: level | 0 })));
     // --- presence: the other players, as bodies -------------------------------
     // Guarded on the world actually having a renderer: the headless harnesses drive this same bridge
     // against a world with no scene and no camera, and co-op must work there exactly as it does in

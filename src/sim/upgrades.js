@@ -258,6 +258,15 @@ export function canUpgrade(b, ctx) {
 // Buys one level. Charges EXACTLY what upgradeCost() quoted, and only after every refusal has been
 // checked — a refused upgrade must cost nothing, and money must never be able to go negative, so
 // the balance test and the debit are adjacent and there is nothing between them that can fail.
+// A bought level is an event other systems have to mirror; a restored level is not. This fires from
+// applyUpgrade only, never from applyUpgradeSave, so loading a save cannot re-broadcast the whole
+// factory back at the room.
+const upgradeListeners = new Set();
+export function onUpgradeApplied(cb) {
+  upgradeListeners.add(cb);
+  return () => upgradeListeners.delete(cb);
+}
+
 export function applyUpgrade(b, ctx) {
   const level = upgradeLevels(b);
   const reason = upgradeBlock(b, ctx);
@@ -271,6 +280,7 @@ export function applyUpgrade(b, ctx) {
   // Same envelope every other machine reacts through, so a bought level flashes the building
   // without this module knowing anything about the renderer.
   b.flash = 1;
+  for (const cb of upgradeListeners) { try { cb(b, now); } catch { /* a listener must not void a paid upgrade */ } }
   return { ok: true, reason: null, spent: cost, cost, level: now };
 }
 

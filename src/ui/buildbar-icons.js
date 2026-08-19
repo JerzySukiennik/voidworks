@@ -51,6 +51,40 @@ const BELT_ICONS = {
     + poly('40,28 48,28 44,35', PALETTE.accent)),
   belt_elev: () => svg(r(6, 30, 52, 4, DARK, 2, 0.3) + r(6, 10, 52, 12, DECK, 2)
     + r(14, 22, 5, 10, DARK) + r(45, 22, 5, 10, DARK) + chev(32, PALETTE.accent, 16)),
+  // The sky curve had no entry and was falling through to the generic grey box, same as the delivery
+  // pad. It is the curve, on legs: the corner ribbon plus the two stanchions the sky conveyor uses,
+  // so the pair reads as one family and the deck is what tells them apart.
+  belt_sky_turn: () => svg(r(6, 34, 52, 3, DARK, 2, 0.3)
+    + r(14, 30, 5, 6, DARK) + r(45, 30, 5, 6, DARK)
+    + ribbonH(26, 32) + ribbonV(4, 22)
+    + poly('32,8 26,14 38,14', PALETTE.accent) + chev(50)),
+  // The sorter was glyphless too. A splitter promises "somewhere else this time"; a sorter promises
+  // "wherever you belong". So the two exits are NOT symmetrical here: one item colour turns off to
+  // the side, the rest carry straight on past a reading pane drawn across the belt.
+  sorter: () => svg(ribbonH(6, 52) + ribbonV(2, 14)
+    // The reading pane, across the belt and BEFORE the junction: an item is inspected first and
+    // routed second, which is the whole difference between this and the splitter.
+    + r(19, 11, 3, 18, PALETTE.rubberLight, 1)
+    + `<circle cx="13" cy="20" r="2.6" fill="${PALETTE.steelLight}"/>`
+    + poly('32,9 27,15 37,15', PALETTE.warn)
+    + `<circle cx="32" cy="5" r="2.4" fill="${PALETTE.warn}"/>`
+    + chev(48)),
+  // The switch, and the tile it has to be told apart from is the Splitter directly beside it. So it
+  // keeps the splitter's junction — the same cross, the same three exits in the same places — and
+  // DIMS two of the three arms. That is the whole machine in one cue: not a different junction, the
+  // same junction with only one road open, which is the sentence a player needs to hold about it.
+  // Only the live exit gets a saturated chevron; the orange dot on its pedestal is the button that
+  // is really modelled on the machine, so the thing you press is drawn on the tile you buy it from.
+  //
+  // Two earlier drafts are worth recording, because both failed for the same reason. Pale ghost
+  // blocks (0.22–0.34) merged with the dark belt into one washed-out column, and narrow capped stubs
+  // read as a mast running through the tile. The arms have to stay DARKER than the void and shorter
+  // than the splitter's: dimmed-and-stubby reads as "shut", washed-out reads as "smudge".
+  belt_switch: () => svg(r(27, 5, 10, 11, DECK, 2, 0.5) + r(27, 24, 10, 11, DECK, 2, 0.5)
+    + ribbonH(6, 52)
+    + chev(22) + chev(50, PALETTE.warn)
+    + r(8, 27, 10, 9, DARK, 2)
+    + `<circle cx="13" cy="31.5" r="3" fill="${PALETTE.warn}"/>`),
 };
 
 // --- upgraders: front elevation, because silhouette is what separates the two families --------
@@ -89,10 +123,25 @@ function dropperIcon(color, big) {
 
 // --- terminals ---------------------------------------------------------------------------------
 
+function stud(cx, cy) {
+  return `<circle cx="${cx}" cy="${cy}" r="2.7" fill="${DARK}"/>`;
+}
+
 const TERMINAL_ICONS = {
   sellpad: () => svg(r(8, 14, 48, 18, PALETTE.accentDeep, 3)
     + r(11, 16, 42, 13, PALETTE.accent, 2)
     + r(24, 19, 16, 7, PALETTE.accentDeep, 2)
+    + r(4, 21, 6, 4, DECK, 1)),
+  // The delivery pad is the sell pad's sibling and has to look like one: same plate, same slot, same
+  // belt stub on the same side, so the eye files them together. It differs in exactly the two things
+  // the MODEL differs in — a gold deck instead of green, and the ring of four studs — which is also
+  // the only pair of cues that survives being drawn 26px wide. Colour alone would not: gold and green
+  // are both mid-value and a colour-blind player would be looking at two identical squares, so the
+  // studs carry the difference in silhouette and the gold only confirms it.
+  sellpad_tier: () => svg(r(8, 14, 48, 18, PALETTE.accentDeep, 3)
+    + r(11, 16, 42, 13, PALETTE.gold, 2)
+    + r(24, 19, 16, 7, PALETTE.accentDeep, 2)
+    + stud(15, 18.5) + stud(49, 18.5) + stud(15, 26.5) + stud(49, 26.5)
     + r(4, 21, 6, 4, DECK, 1)),
   buffer: () => svg(r(12, 10, 40, 22, STEEL, 3)
     + r(10, 32, 44, 3, DARK, 1)
@@ -114,6 +163,11 @@ export function iconFor(def, paneColor) {
     return dropperIcon(heads[def.id] || PALETTE.steelLight, def.cells.length > 1);
   }
   if (TERMINAL_ICONS[def.id]) return TERMINAL_ICONS[def.id]();
+  // The delivery pad shipped with no entry here and therefore with no glyph at all — a blank tile in
+  // a bar where every other machine is drawn. The lookup is by id, so ANY sell-family building added
+  // or renamed later would fall into the same hole silently. These two lines close it by family
+  // rather than by id: a pad the catalogue invents tomorrow gets the pad drawing, not an empty box.
+  if (def.family === 'sell') return TERMINAL_ICONS[def.tierPad || def.orderPad ? 'sellpad_tier' : 'sellpad']();
   return svg(r(16, 12, 32, 20, STEEL, 3));
 }
 

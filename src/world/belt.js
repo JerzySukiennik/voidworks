@@ -1,6 +1,6 @@
 // Voidworks — belt graph: lane baking, linking, back-pressured item motion and the instanced item draw.
 
-import { GRID, FLOW, ECONOMY, SORTER, SELLPAD } from '../config.js';
+import { GRID, FLOW, ECONOMY, SORTER, SELLPAD, DELIVERY, SWITCH } from '../config.js';
 import { dirVec, rotOffset, opposite } from './grid.js';
 import { rollTier, rollValue, clampTier, TOP_TIER } from './items.js';
 
@@ -13,8 +13,64 @@ export function createFlow(ctx) {
   const iTier = new Uint8Array(MAX);
   const iValue = new Float32Array(MAX);
   const iT = new Float32Array(MAX);
-  const iCool = new Float32Array(MAX);
-  const iCoolMul = new Float32Array(MAX);
+  // --- per-item, PER-BUILDING gate cooldowns -------------------------------------
+  // This used to be two timers per item — one for `flat` gates, one for every other kind — which is
+  // not what a cooldown on a machine means. A gate's cooldown never stopped THAT gate re-farming an
+  // item; it stopped every OTHER gate of the same class the item met before the clock ran out. At
+  // beltSpeed 2.4 a cell takes 0.417 s while cooldowns rise with strength (x1.25 -> 0.5 s, x3 -> 1.0,
+  // x5 -> 1.4, x10 -> 2.0), so the STRONGER, later gate on a tight line was the one silently
+  // swallowed: a x5 placed one tile after a x3 never fired at all, and its value never showed up on
+  // the item or as a pop. Jurek reported it as "the x5 does not make items grow"; it was not a
+  // visual bug, the machine was inert. Two belts of separation made it work again, which is how a
+  // deterministic threshold sitting exactly on the upstream gate's cooldown showed itself.
+  //
+  // So the cooldown is now keyed on (item, BUILDING): CD_SLOTS recent gates per item, each slot a
+  // building uid and the sim time its cooldown expires. Fixed arrays, no allocation, no map. Eight
+  // slots because a looped line can carry several gates between one machine and the item's return
+  // to it, and the anti-loop intent — one gate must not re-farm the same item as it comes round —
+  // only holds while that gate is still remembered. ECONOMY.maxUpgradesPerItem still caps the chain
+  // at 12 firings per item, so this cannot become unbounded.
+  //
+  // 8 slots * 900 items * (4 + 4) bytes = 57 KB, paid once at boot.
+  const CD_SLOTS = 8;
+  const iCdUid = new Int32Array(MAX * CD_SLOTS);
+  const iCdEnd = new Float32Array(MAX * CD_SLOTS);
+  // The sim's own clock, advanced by update(dt). Absolute expiry times mean nothing is decremented
+  // per item per tick — the old pair of timers cost two writes per item per frame purely to keep a
+  // number that was almost always zero.
+  let simNow = 0;
+
+  function cdClear(id) {
+    const base = id * CD_SLOTS;
+    for (let k = 0; k < CD_SLOTS; k += 1) iCdUid[base + k] = 0;
+  }
+
+  // Is this exact building still cooling down on this exact item?
+  function cdBlocked(id, uid) {
+    const base = id * CD_SLOTS;
+    for (let k = 0; k < CD_SLOTS; k += 1) {
+      if (iCdUid[base + k] === uid) return iCdEnd[base + k] > simNow;
+    }
+    return false;
+  }
+
+  // Remember that `uid` just fired on this item. Reuse its own slot if it has one, else take an
+  // expired slot, else evict the slot that expires soonest — the one whose memory is worth least.
+  function cdSet(id, uid, seconds) {
+    const base = id * CD_SLOTS;
+    let slot = -1;
+    let worst = -1;
+    let worstEnd = Infinity;
+    for (let k = 0; k < CD_SLOTS; k += 1) {
+      const u = iCdUid[base + k];
+      if (u === uid) { slot = k; break; }
+      if (u === 0 || iCdEnd[base + k] <= simNow) { if (slot < 0) slot = k; continue; }
+      if (iCdEnd[base + k] < worstEnd) { worstEnd = iCdEnd[base + k]; worst = k; }
+    }
+    if (slot < 0) slot = worst < 0 ? 0 : worst;
+    iCdUid[base + slot] = uid;
+    iCdEnd[base + slot] = simNow + (seconds > 0 ? seconds : 0);
+  }
   const iFlash = new Float32Array(MAX);
   const iUses = new Uint8Array(MAX);
   const iKinds = new Uint8Array(MAX);
@@ -34,6 +90,31 @@ export function createFlow(ctx) {
   // so the hook is settable rather than construction-only. One line of wiring in world.js instead of
   // a reordering of its boot.
   let onDeliver = ctx.onDeliver || null;
+
+  // --- what the order board wants ------------------------------------------------
+  // The Delivery Pad has no material setting: it accepts whatever a live order still needs and
+  // destroys the rest. That answer changes when an order is issued, completed or expires — a few
+  // times a minute — while items arrive at the pad constantly, so it is CACHED here and invalidated
+  // on the board's own version counter rather than recomputed per item. `wantSrc` is anything with
+  // wantedMask() and wantedVersion(); orders.js is exactly that shape.
+  let wantSrc = ctx.orders && typeof ctx.orders.wantedMask === 'function' ? ctx.orders : null;
+  let wantMask = 0;
+  let wantVer = -1;
+
+  // Bitmask over material tiers with an open contract. 0 = the board is empty, orders are switched
+  // off, or nothing is wired yet — all three mean "no demand", never "reject everything".
+  function setWantedSource(src) {
+    wantSrc = src && typeof src.wantedMask === 'function' && typeof src.wantedVersion === 'function' ? src : null;
+    wantVer = -1;
+    wantMask = 0;
+  }
+
+  function wantedMask() {
+    if (!wantSrc) return 0;
+    const v = wantSrc.wantedVersion();
+    if (v !== wantVer) { wantVer = v; wantMask = wantSrc.wantedMask() | 0; }
+    return wantMask;
+  }
 
   let laneList = [];
   let emitters = [];
@@ -75,6 +156,9 @@ export function createFlow(ctx) {
   }
 
   function release(id) {
+    // The id goes straight back on the free list, so its gate memory has to die with it — otherwise
+    // a recycled slot arrives at a machine already "cooling down" from an item that no longer exists.
+    cdClear(id);
     freeList[freeTop] = id;
     freeTop += 1;
     live -= 1;
@@ -83,8 +167,7 @@ export function createFlow(ctx) {
   function initItem(id, tierIdx, value) {
     iTier[id] = tierIdx;
     iValue[id] = value;
-    iCool[id] = 0;
-    iCoolMul[id] = 0;
+    cdClear(id);
     iFlash[id] = 0;
     iUses[id] = 0;
     iKinds[id] = 0;
@@ -133,6 +216,9 @@ export function createFlow(ctx) {
       // 0 = takes anything (every belt in the game). 1 = the filtered tier's arm of a sorter.
       // 2 = the everything-else arm. Baked once; the routing decision reads it per item.
       route: s.route || 0,
+      // Which exit of a switch conveyor this lane is. -1 on every other belt in the game. Baked once;
+      // the routing decision compares it against the building's current setting.
+      arm: s.arm === undefined ? -1 : s.arm,
       emit: false,
       trig: s.trig === undefined ? -1 : s.trig * len,
       items: [],
@@ -163,9 +249,41 @@ export function createFlow(ctx) {
     return setFilter(b, (filterOf(b) + (dir || 1) + n * 2) % n);
   }
 
+  // --- the switch conveyor's one number ------------------------------------------
+  // A switch is a manual points: which arm is open is a property the PLAYER sets and nothing in the
+  // sim ever changes. It lives on the building as `switchArm` for the same reason `filterTier` does
+  // — every path that creates a building (player, save restore, network mirror, test) gets a valid
+  // default without any of them having to know the field exists.
+
+  function armCount(b) {
+    return b && b.def.lanes ? b.def.lanes.length : SWITCH.arms;
+  }
+
+  function switchOf(b) {
+    if (!b || !b.def.switchable) return -1;
+    return b.switchArm === undefined ? SWITCH.defaultArm : b.switchArm;
+  }
+
+  function setSwitch(b, i) {
+    if (!b || !b.def.switchable) return -1;
+    const n = armCount(b);
+    let v = i | 0;
+    v = ((v % n) + n) % n;
+    b.switchArm = v;
+    b.flash = 1;
+    return v;
+  }
+
+  // The one call the input piece needs. `dir` defaults to +1; pass -1 to step back.
+  function toggleSwitch(b, dir) {
+    if (!b || !b.def.switchable) return -1;
+    return setSwitch(b, switchOf(b) + (dir === undefined ? 1 : dir));
+  }
+
   function bake(b) {
     const def = b.def;
     if (def.filter && b.filterTier === undefined) b.filterTier = clampTier(SORTER.defaultTier);
+    if (def.switchable && b.switchArm === undefined) b.switchArm = SWITCH.defaultArm;
     b.lanes = [];
     const specs = def.lanes || [];
     for (let i = 0; i < specs.length; i += 1) b.lanes.push(bakeLane(b, specs[i]));
@@ -403,7 +521,14 @@ export function createFlow(ctx) {
       // `sort` is the building being fed, and only when that building sorts. Carrying it on the LINK
       // rather than looking it up per item keeps the hot loop free of grid lookups and of branches
       // for the 99% of links that feed ordinary belt.
-      l.link = { lanes, t0, rr: 0, sort: target.def.sort ? target : null };
+      // `sort` / `sw` are the building being fed, and only when that building sorts or switches.
+      // Carrying them on the LINK rather than looking them up per item keeps the hot loop free of
+      // grid lookups and of branches for the 99% of links that feed ordinary belt.
+      l.link = {
+        lanes, t0, rr: 0,
+        sort: target.def.sort ? target : null,
+        sw: target.def.switchable ? target : null,
+      };
       // The reverse edge. Spacing is a property of the WORLD, not of one lane's parameter: the point
       // at t = len of this lane and the point at t0 of the lane it feeds are the same place. Without
       // an edge pointing back, a stalled belt packs items on top of each other across every join.
@@ -463,6 +588,16 @@ export function createFlow(ctx) {
     return lane.route === (iTier[id] === filterOf(b) ? 1 : 2);
   }
 
+  // Which arm of a switch is open. Unlike a sorter this does not depend on the item at all — the
+  // answer is the same for everything, which is exactly what makes it a points and not a splitter.
+  // Items ALREADY riding a closed arm are untouched: this gates entry only, so flipping the switch
+  // under a moving line changes where the next item goes and never where the current one ends up.
+  function armOk(link, lane) {
+    const b = link.sw;
+    if (!b || lane.arm < 0) return true;
+    return lane.arm === switchOf(b);
+  }
+
   // How much room the far side of a link has. An item may take any arm that is offered, so the arm
   // with the most room is what decides whether the head of this lane may roll up to its exit.
   // `id` is the head item: on a sorting link the answer depends on WHICH item is asking, because it
@@ -474,7 +609,9 @@ export function createFlow(ctx) {
     // somewhere. A sorter is the opposite case: its arms are ASSIGNED, so an arm leading nowhere
     // must stay open and spill into the void exactly as a dead-ended belt already does — hiding it
     // would jam the whole line behind a material the player forgot to give an exit to.
-    if (n > 1 && !link.sort) {
+    // A switch is the sorter case, not the splitter case: its arm is CHOSEN, so an arm leading
+    // nowhere must stay open and spill into the void rather than be quietly skipped.
+    if (n > 1 && !link.sort && !link.sw) {
       for (let k = 0; k < n; k += 1) {
         const c = link.lanes[k];
         if (c.link || c.sink) { anyLive = true; break; }
@@ -485,6 +622,7 @@ export function createFlow(ctx) {
       const c = link.lanes[k];
       if (anyLive && !c.link && !c.sink) continue;
       if (link.sort && !routeOk(link, c, id)) continue;
+      if (link.sw && !armOk(link, c)) continue;
       if (c.sink) return Infinity;
       // An arm barred by a lane it yields to offers no room at all. If this said otherwise, the head
       // upstream would roll onto the join expecting to hand off and then find the door shut.
@@ -511,7 +649,7 @@ export function createFlow(ctx) {
     // A splitter arm with nothing attached is a trap: items would round-robin into it and stall
     // there forever. When any arm leads somewhere, only those arms are offered.
     let anyLive = false;
-    if (n > 1 && !link.sort) {
+    if (n > 1 && !link.sort && !link.sw) {
       for (let k = 0; k < n; k += 1) {
         const c = link.lanes[k];
         if (c.link || c.sink) { anyLive = true; break; }
@@ -524,6 +662,9 @@ export function createFlow(ctx) {
       // The one line that turns a splitter into a sorter. Note it does NOT fall through to another
       // arm when this one is full: `insertVia` simply returns false and the item stays put.
       if (link.sort && !routeOk(link, c, id)) continue;
+      // The same, for a switch: the closed arms are not alternatives, they are shut. An item waits
+      // for the open arm exactly as it would wait behind a full belt.
+      if (link.sw && !armOk(link, c)) continue;
       if (c.sink || (clearanceAt(c, link.t0[j], from, true) >= FLOW.itemSpacing && !nearSibling(c, link.t0[j]))) {
         link.rr = (j + 1) % n;
         laneInsert(c, id, link.t0[j]);
@@ -546,19 +687,44 @@ export function createFlow(ctx) {
     const b = lane.b;
     if (b.def.family === 'sell') {
       const t = iTier[id];
-      // A Contract Pad pays a premium for exactly one material and a penalty for the rest, so the
-      // scaling happens HERE, on the value handed to the bank — economy.sell() stays the single
-      // place the prestige multiplier and the sell rate are applied, and never learns about tiers.
+      // The Delivery Pad has no material setting. It reads the live order board: whatever an open
+      // contract still wants is accepted at a premium and credited to that contract, and everything
+      // else is DESTROYED — no money, slot freed, value gone. Feeding it a mixed stream is a player
+      // mistake and is supposed to read as one.
+      //
+      // The one exception is an EMPTY board — no live order, or orders switched off. Nothing is
+      // wanted then, so nothing can be wrong, and the pad degrades to an ordinary sell pad instead
+      // of eating a line for a gap in a timer the player does not control. See DELIVERY in config.
       let matched = false;
       let mult = 1;
-      if (b.def.tierPad) {
+      if (b.def.delivery) {
+        const mask = wantedMask();
+        if (mask) {
+          if (!(mask & (1 << t))) {
+            // Destroyed, and counted as destroyed: `spawned - sold - destroyed === live` has to keep
+            // holding through this path or the ledger is a decoration.
+            b.flash = 1;
+            if (ctx.onReject) ctx.onReject(b, t);
+            release(id);
+            st.destroyed += 1;
+            return true;
+          }
+          matched = true;
+          mult = DELIVERY.wantedMult;
+        } else {
+          mult = DELIVERY.idleMult;
+        }
+      } else if (b.def.tierPad) {
+        // Retained for any pad definition that still carries a manual filter. No shipped definition
+        // does since the Delivery Pad replaced the Contract Pad, so this branch is dormant rather
+        // than dead — it is the behaviour a filtered pad would get if one were ever reintroduced.
         matched = t === filterOf(b);
         mult = matched ? SELLPAD.matchMult : SELLPAD.missMult;
       }
       const paid = economy.sell(iValue[id] * mult * (b.def.payMult || 1));
       b.flash = 1;
       if (ctx.onSell) ctx.onSell(b, paid, t);
-      // Only a MATCHED delivery into a tier pad counts toward an order. A plain pad contributes
+      // Only a delivery the board actually asked for counts toward an order. A plain pad contributes
       // nothing, which is what stops an order being filled by a line that is already running.
       if (matched && onDeliver) onDeliver(t, 1, b);
       release(id);
@@ -575,8 +741,8 @@ export function createFlow(ctx) {
   function fire(lane, id) {
     const u = lane.b.def.upg;
     if (!u) return;
-    const flat = u.kind === 'flat';
-    if ((flat ? iCool[id] : iCoolMul[id]) > 0) return;
+    // This machine's own cooldown on this exact item. Nothing another machine did can block it.
+    if (cdBlocked(id, lane.b.uid)) return;
     if (iUses[id] >= ECONOMY.maxUpgradesPerItem) return;
     const bit = KIND_BIT[u.kind] || 0;
     if (u.once && (iKinds[id] & bit)) return;
@@ -591,8 +757,7 @@ export function createFlow(ctx) {
     iTier[id] = r.tier;
     iUses[id] += 1;
     iKinds[id] |= bit;
-    if (flat) iCool[id] = u.cooldown || 0;
-    else iCoolMul[id] = u.cooldown || 0;
+    cdSet(id, lane.b.uid, u.cooldown || 0);
     iFlash[id] = 1;
     lane.b.flash = 1;
     if (ctx.onUpgrade) ctx.onUpgrade(lane.b, r.value - before, false);
@@ -651,8 +816,6 @@ export function createFlow(ctx) {
       // rounded value lands above it, and the crossing is then never seen on any step.
       iT[id] = nt;
       const now = iT[id];
-      if (iCool[id] > 0) iCool[id] -= dt;
-      if (iCoolMul[id] > 0) iCoolMul[id] -= dt;
       if (iFlash[id] > 0) iFlash[id] -= dt * 3.2;
       if (trig >= 0 && old < trig && now >= trig) {
         if (fire(lane, id)) continue;
@@ -743,6 +906,7 @@ export function createFlow(ctx) {
   }
 
   function update(dt) {
+    simNow += dt;
     if (dirty) relink();
     let running = 0;
     for (let i = 0; i < laneList.length; i += 1) {
@@ -827,6 +991,9 @@ export function createFlow(ctx) {
     for (const b of stores) if (b.store) { b.store.count = 0; b.store.head = 0; }
     st.destroyed += live;
     freeTop = MAX;
+    // clear() hands every id back without going through release(), so the gate memory has to be
+    // wiped here too or a fresh factory starts with items that machines think they just upgraded.
+    for (let i = 0; i < MAX * CD_SLOTS; i += 1) iCdUid[i] = 0;
     for (let i = 0; i < MAX; i += 1) freeList[i] = MAX - 1 - i;
     live = 0;
     stored = 0;
@@ -848,10 +1015,42 @@ export function createFlow(ctx) {
     filterOf,
     setFilter,
     cycleFilter,
+    // --- switch conveyor, for the input/UI piece ---------------------------------
+    // switchOf(b) -> 0..2, or -1 if b is not a switch. SWITCH.labels names them.
+    switchOf,
+    // setSwitch(b, i) -> the arm that is now open (wrapped into range), or -1.
+    setSwitch,
+    // toggleSwitch(b, dir) -> the arm that is now open, or -1. dir defaults to +1.
+    toggleSwitch,
+    // The world direction 0..3 the open arm currently exits by, already rotated with the building —
+    // what an arrow or a lit indicator should point along. -1 if b is not a switch.
+    switchDirOf(b) {
+      if (!b || !b.def.switchable) return -1;
+      const specs = b.def.lanes || [];
+      const i = switchOf(b);
+      for (let k = 0; k < specs.length; k += 1) if (specs[k].arm === i) return (specs[k].outDir + b.rot) & 3;
+      return -1;
+    },
     // cb(tier, count, pad) — fired only when a Contract Pad consumes an item of the material it is
     // set to. This is the ONLY channel orders listen on, which is what makes "a line already running
     // cannot fill an order" true by construction rather than by policy.
-    setDeliverHook(fn) { onDeliver = typeof fn === 'function' ? fn : null; },
+    // Accepts either a plain function (legacy) or the orders API object itself. Passing the object
+    // wires BOTH the credit channel and the wanted-set the Delivery Pad reads, in one line — which
+    // is the whole wiring this feature needs in world.js.
+    setDeliverHook(fn) {
+      if (fn && typeof fn === 'object' && typeof fn.deliver === 'function') {
+        const api = fn;
+        onDeliver = (t, n, pad) => api.deliver(t, n, pad);
+        if (typeof api.wantedMask === 'function' && typeof api.wantedVersion === 'function') setWantedSource(api);
+        return;
+      }
+      onDeliver = typeof fn === 'function' ? fn : null;
+    },
+    // The order board the Delivery Pad reads. Anything with wantedMask() and wantedVersion(); null
+    // clears it, which puts every pad back to plain-rate pass-through.
+    setWantedSource,
+    // The cached mask, for the UI and for tests. 0 means "no demand".
+    wantedMask,
     // `live` is the whole population — riding a belt or parked in a vault. This is what the cap counts.
     get count() { return live; },
     get onBelts() { return live - stored; },

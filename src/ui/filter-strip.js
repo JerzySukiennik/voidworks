@@ -59,6 +59,7 @@ export function createFilterStrip(world) {
   root.dataset.vwFilter = 'off';
   const box = document.createElement('div');
   box.className = 'vw-filter-in';
+  box.dataset.vwFilterFor = '';
   const what = document.createElement('div');
   what.className = 'vw-filter-what';
   const now = document.createElement('div');
@@ -122,6 +123,7 @@ export function createFilterStrip(world) {
     lastName = target.def.name;
     lastTier = tier;
     what.textContent = target.def.name;
+    box.dataset.vwFilterFor = target.def.id;
     now.textContent = ITEMS.tiers[tier].name;
     now.style.color = C.ink;
     for (let i = 0; i < buttons.length; i += 1) buttons[i].classList.toggle('on', i === tier);
@@ -157,6 +159,12 @@ export function createFilterStrip(world) {
     // The machine can be deleted out from under the strip; a target that is no longer in the world
     // is dropped at once rather than left describing a hole in the factory.
     if (!world.buildings.has(target.uid)) { drop(); return; }
+    // ...and a machine that no longer HAS a material to pick is dropped just as fast. The strip's
+    // whole membership test is `hasFilter(def)` from the catalogue — there is not, and must never be,
+    // a list of building ids in this file. When the Delivery Pad stopped asking the player to choose
+    // an ore, that one predicate is what took it off this strip and left the Sorter on it; this line
+    // is only the latch's half of the same rule, for a target already held when the answer changed.
+    if (!hasFilter(target.def)) { drop(); return; }
     if (inside) { hold = F.hold; paint(false); return; }
     hold -= SURFACE.filterPoll;
     if (hold <= 0) drop();

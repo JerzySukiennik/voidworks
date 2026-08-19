@@ -4,9 +4,12 @@
 // Three design constraints shaped every number in here, and all three are load-bearing:
 //
 //   1. An order must never be satisfiable by a line that is already running and doing nothing new.
-//      Only a delivery into a Contract Pad SET TO THE ORDER'S OWN MATERIAL counts. A plain sell pad
-//      contributes exactly zero, so filling an order always costs a sorter and a matched pad — or,
-//      at minimum, re-targeting ones you already own, which is itself a layout decision.
+//      Only a delivery into a DELIVERY PAD counts; a plain sell pad contributes exactly zero. The
+//      pad has no material setting of its own — it accepts whatever this board still wants and
+//      destroys everything else outright — so filling an order costs a sorter feeding it a clean
+//      stream of the right material. Aiming a mixed line at it does not merely pay less, it burns
+//      the mismatch. (Previously the pad carried a manual tier setting and paid 0.35x for a miss;
+//      Jurek replaced that with the order board and outright destruction, 2026-08-19.)
 //
 //   2. Orders must not stack into an exploit. There are `ORDERS.slots` of them, never two for the
 //      same material, and progress is clamped at `need` — so bonus income is bounded above by
@@ -43,6 +46,31 @@ export function createOrders(ctx) {
   let completed = 0;
   let expired = 0;
   let bonusEarned = 0;
+
+  // --- the wanted set -----------------------------------------------------------
+  // The Delivery Pad accepts whatever any live order still wants and destroys everything else, so
+  // "what is wanted right now" is read on the sell path — a hot-ish path that must not walk the slot
+  // array per item. It is therefore published as a BITMASK over tiers plus a version counter: the
+  // consumer caches the mask and only rebuilds it when the version moves. Orders change a handful of
+  // times a minute; items arrive constantly, so the invalidation goes on the rare side.
+  //
+  // Bit t is set when some slot holds an unfinished order for tier t. `enabled === false` publishes
+  // 0, which the pad reads as "no demand" — the same state as an empty board.
+  let wantMask = 0;
+  let wantVer = 1;
+
+  function refreshWanted() {
+    let m = 0;
+    if (enabled) {
+      for (let i = 0; i < slots.length; i += 1) {
+        const o = slots[i].order;
+        if (o && o.done < o.need) m |= 1 << o.tier;
+      }
+    }
+    if (m === wantMask) return;
+    wantMask = m;
+    wantVer += 1;
+  }
 
   // One entry per slot. `order` is the live contract or null; `nextAt` is when an empty slot refills.
   const slots = [];
@@ -104,6 +132,7 @@ export function createOrders(ctx) {
     const o = makeOrder();
     if (!o) { slot.nextAt = time + ORDERS.cooldown; return; }
     slot.order = o;
+    refreshWanted();
     emit('issued', o, 0);
   }
 
@@ -122,6 +151,7 @@ export function createOrders(ctx) {
     }
     bonusEarned += payout;
     o.completedAt = time;
+    refreshWanted();
     emit('completed', o, payout);
   }
 
@@ -130,6 +160,7 @@ export function createOrders(ctx) {
     slot.order = null;
     slot.nextAt = time + ORDERS.cooldown;
     expired += 1;
+    refreshWanted();
     // No penalty applied here, and there must never be one. See the header.
     emit('expired', o, 0);
   }
@@ -177,6 +208,21 @@ export function createOrders(ctx) {
     update,
     deliver,
 
+    // --- what the Delivery Pad reads ---------------------------------------------
+    // Bitmask over material tiers with a live, unfinished order. 0 means the board is empty (or
+    // orders are off), which the pad treats as "no demand", never as "reject everything".
+    wantedMask() { return wantMask; },
+    // Bumped only when the mask actually CHANGES value, so a consumer that caches on this number
+    // rebuilds once per real board change and never on a tick that merely advanced the clock.
+    wantedVersion() { return wantVer; },
+    // Convenience for the UI; the sim uses the mask directly.
+    wants(t) { return (wantMask & (1 << (t | 0))) !== 0; },
+    wantedTiers() {
+      const out = [];
+      for (let t = 0; t <= TOP_TIER; t += 1) if (wantMask & (1 << t)) out.push(t);
+      return out;
+    },
+
     // --- state, for the UI ------------------------------------------------------
     active,
     // Seconds left on an order, clamped at zero. The UI should not have to know about the clock.
@@ -193,7 +239,7 @@ export function createOrders(ctx) {
     get expired() { return expired; },
     get bonusEarned() { return bonusEarned; },
     get enabled() { return enabled; },
-    setEnabled(v) { enabled = !!v; },
+    setEnabled(v) { enabled = !!v; refreshWanted(); },
     // Co-op: only the authority credits the shared bank. Everyone still tracks and displays.
     get crediting() { return crediting; },
     setCrediting(v) { crediting = !!v; },
@@ -253,6 +299,7 @@ export function createOrders(ctx) {
           endsAt: Math.max(0, s.left || 0),
         };
       }
+      refreshWanted();
       return true;
     },
 
@@ -263,6 +310,7 @@ export function createOrders(ctx) {
       expired = 0;
       bonusEarned = 0;
       for (let i = 0; i < slots.length; i += 1) { slots[i].order = null; slots[i].nextAt = 0; }
+      refreshWanted();
     },
   };
 }

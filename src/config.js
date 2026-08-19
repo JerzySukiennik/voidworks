@@ -191,9 +191,10 @@ export const PANES = {
 
 export const ECONOMY = {
   // You start in an empty void with exactly enough to build the first loop yourself:
-  // a Scrap Dropper (200) + two Conveyors (2x25) + a Sell Pad (400) = 650, plus 100 of slack so a
-  // misplaced tile is a lesson rather than a dead save. Nothing is built for you.
-  startMoney: 750,
+  // a Scrap Dropper (2800) + two Conveyors (2x350) + a Sell Pad (5600) = 9100, plus 900 of slack so
+  // a misplaced tile is a lesson rather than a dead save. Nothing is built for you.
+  // These are the retuned prices: see the price note under UNLOCKS for why every cost moved at once.
+  startMoney: 10000,
   sellPadRate: 1.0,
   autosaveSeconds: 8,
   storageKey: 'voidworks.save.v1',
@@ -673,10 +674,15 @@ export const HUD = {
 export const PRESTIGE = {
   // Points are earned from THIS run's `earned`, on a square-root curve:
   //   gain = floor(scale * sqrt(earned / requirement))
-  // 100k -> 1 point, 400k -> 2, 900k -> 3, 2.5M -> 5, 10M -> 10. The first reset is cheap enough to
+  // 3.5M -> 1 point, 14M -> 2, 31.5M -> 3, 87.5M -> 5, 350M -> 10. The first reset is cheap enough to
   // be tempting; the fourth costs sixteen times the first. Linear would have made every reset the
   // same decision forever, which is the one thing a prestige curve must not do.
-  requirement: 100000,
+  //
+  // RETUNED with the unlock ladder: against the corrected income curve the old 100k requirement was
+  // reached in about ten seconds, which made the first prestige an accident rather than a decision.
+  // 3.5M puts it around forty-five minutes in — mid-game, once the player has a factory worth
+  // regretting the loss of.
+  requirement: 3500000,
   scale: 1,
 
   // Each point is +25% on the SALE PRICE — the single number every item in the game funnels through
@@ -700,16 +706,33 @@ export const UNLOCKS = {
   // a building's price, they have paid off their current line and have roughly its cost banked, so
   // the tier opens the moment it is affordable rather than as a sign to go grind.
   //
-  //   L1  Ore Dropper 1400, Refiner 2600, fast/sky belts     ->    2,000
-  //   L2  Fusion Furnace 9000, Deep Drill 12000, Crucible    ->   25,000
-  //   L3  Transmuter 45000, Gamble Press 60000, Reactor      ->  120,000
-  //   L4  Void Infuser 190000, Void Extractor 250000, Nova   ->  500,000
-  //   L5  Singularity Gate 1600000                           -> 4,000,000
+  // RETUNED. The old ladder was written against an income curve that no longer exists: upgraders
+  // only fired when items were spread far apart, which quietly meant a densely packed line — the way
+  // everyone actually builds — earned about a fortieth of what it should. With that fixed, income
+  // rose sharply and the whole ladder fell in well under two minutes of play.
   //
-  // Assumed pacing on a first playthrough: a starter loop earns a few $/s, so L1 lands inside the
-  // first ten minutes — early enough that the bar is never a wall, late enough that the player has
-  // built one loop with their own hands before being handed a second dropper.
-  thresholds: [0, 2000, 25000, 120000, 500000, 4000000],
+  // These thresholds are measured, not guessed. `work/tools/pacetest.mjs` builds the canonical line a
+  // player can AFFORD at each tier, runs the real sim to get its real $/s, and solves each threshold
+  // from how long that tier should last. Costs and thresholds are solved together, because prices
+  // decide how much factory a budget buys and that decides income.
+  //
+  // Target time on each tier: 8, 15, 25, 40, 60 minutes — about two and a half hours of active play
+  // to the last gate, each tier a longer commitment than the one before it, none of them a wall.
+  //
+  //   L1  Ore Dropper, Refiner, fast/sky belts      ->        30,000
+  //   L2  Fusion Furnace, Deep Drill, Crucible      ->       250,000
+  //   L3  Transmuter, Gamble Press, Reactor         ->     2,000,000
+  //   L4  Void Infuser, Void Extractor, Nova Press  ->    12,000,000
+  //   L5  Singularity Gate                          ->   220,000,000
+  //
+  // Each step is roughly ten times the last because tier income is too: a tier earns about an order
+  // of magnitude more than the one below it, so a gentler ladder would not gate anything at all.
+  //
+  // BUILDING PRICES moved in the same pass (see src/world/buildings.js), scaled per tier so a tier's
+  // signature machine costs about ninety seconds of that tier's income. Raising the thresholds alone
+  // would have left every machine affordable on sight and turned each tier into a wait rather than a
+  // series of build decisions.
+  thresholds: [0, 30000, 250000, 2000000, 12000000, 220000000],
 };
 
 // --- owned by: net ------------------------------------------------------------
@@ -1180,4 +1203,133 @@ export const UPGRADES = {
   // as ECONOMY.refund, deliberately: an upgrade is a purchase attached to a building, not a
   // separate currency with its own rules.
   refund: 0.5,
+};
+
+// --- owned by: flow (delivery pad + switch conveyor) --------------------------
+// Appended section. Everything above this line belongs to another piece.
+
+export const DELIVERY = {
+  // The Delivery Pad has NO material setting. It reads the live order board and accepts whatever any
+  // open contract still wants; anything else that lands on it is destroyed outright — no money, and
+  // the slot is freed. That is deliberately brutal: the pad announces its demand on the order board,
+  // so feeding it a mixed stream is a player mistake and has to read as one.
+  //
+  // What it pays for a WANTED item. Same 2.2x the old Contract Pad paid for its matched material, so
+  // the pad's economics are unchanged for the case it was always meant for: a sorted line feeding it
+  // exactly what an order asks for.
+  wantedMult: 2.2,
+
+  // What it pays when the board is EMPTY — no live order at all, or orders switched off. In that
+  // state nothing is wanted, so nothing can be "wrong", and the pad degrades to an ordinary sell pad
+  // instead of eating the player's whole line for a timing gap it does not control. 1.0 and not the
+  // premium, on purpose: the premium is payment for meeting demand, and with no demand there is
+  // nothing to pay for. Set this to 0 and the no-order case becomes a total-loss pad; see
+  // work/tools/deliverytest.mjs, which asserts the chosen behaviour rather than describing it.
+  idleMult: 1.0,
+};
+
+export const SWITCH = {
+  // A manual points/turnout, not a splitter and not a load balancer. One input, three possible
+  // exits, and exactly ONE of them live at a time; the player changes which by clicking the button
+  // on the tile, and it holds until clicked again. Arm order is the cycle order.
+  //
+  //   0 straight (+X at rot 0)   1 left (-Z at rot 0)   2 right (+Z at rot 0)
+  //
+  // The same geometry the Splitter already uses, so a switch tiles into an existing run and a player
+  // who knows where a splitter's arms point knows where a switch's do.
+  arms: 3,
+  labels: ['Straight', 'Left', 'Right'],
+
+  // Which arm a freshly placed switch is set to. Straight: a switch dropped into a run behaves like
+  // the belt it replaced until the player says otherwise.
+  defaultArm: 0,
+
+  // Arms that lead nowhere stay SELECTABLE. Same rule as a sorter and for the same reason: the arm
+  // is assigned by the player, so hiding a dead one would silently move items somewhere they did not
+  // choose. A switch pointed at nothing spills into the void exactly as a dead-ended belt does.
+  hideDeadArms: false,
+};
+
+// --- owned by: ui (delivery-pad readout, switch control and its world marker) --
+// Two controls that had no surface at all. Both follow the same rule the rest of this file follows:
+// the numbers live here, the modules read them, and nothing about either control is spelled twice.
+
+export const PAD_UI = {
+  // The delivery pad has no material to pick, so the inspector's "Material" row is a lie on it. It
+  // becomes this row instead: what the pad is accepting RIGHT NOW, read off the live order board.
+  // Deliberately not a static description of the rule — the whole point is that the answer changes
+  // under the player, and a row that never moved would be no better than the sentence in the tooltip.
+  label: 'Accepting',
+  // How many material names fit before the row starts counting instead of listing. Three, because
+  // ORDERS.slots is three and the row is half of a 300px panel; a fourth would ellipsize mid-word.
+  maxNames: 3,
+  join: ', ',
+  // Board empty. With DELIVERY.idleMult at 1 this is not a failure state — the pad degrades to an
+  // ordinary sell pad — so the copy says what it is doing, not that something is wrong.
+  idleFlat: 'Nothing wanted · flat rate',
+  // The same state when idleMult is 0, i.e. a pad that really is eating everything. Chosen by
+  // reading DELIVERY.idleMult rather than by assuming, so retuning that number retunes this string.
+  idleDestroy: 'Nothing wanted · destroying',
+  // Shown in the Status row alongside, so the state is visible even with the panel scrolled.
+  statusWanted: 'Filling orders',
+  statusIdleFlat: 'No orders · flat rate',
+  statusIdleDestroy: 'No orders · destroying',
+  // The pad before the orders module answers at all (a save mid-load, orders switched off).
+  unknown: 'Unknown',
+};
+
+export const SWITCH_UI = {
+  // How the player throws the points. Three ways in, deliberately, because they answer three
+  // different questions and none of them subsumes the others:
+  //
+  //   click   — the literal ask. With no build tool in hand a left-click on the tile is currently
+  //             dead input, so this costs nothing and reads as pressing the button that is drawn on
+  //             the machine. It is told from a camera drag by BUILD.clickSlop, exactly as the
+  //             right-click inspect already is.
+  //   key     — `T` over the tile, for the player who is mid-build with a tool in hand and must not
+  //             have their left-click stolen from placing. R and F already work this way.
+  //   panel   — a row in the inspector, so the state is legible and changeable without knowing
+  //             either of the above exists.
+  key: 't',
+  // Left-click toggles only when the hand is EMPTY. With a tool up, left-click belongs to placement
+  // and always will — a switch you cannot build over would be a hole in the grid.
+  clickWhenIdle: true,
+
+  // The world marker. A switch whose setting you have to open a panel to read is a switch you will
+  // mis-wire, so every placed one carries a chevron on its live exit. Drawn from the building's own
+  // baked lane, the same way the hologram derives its arrows, so it can never disagree with where
+  // items actually go.
+  marker: {
+    // TWO chevrons on the live arm, a short trail rather than one badge — the same language the build
+    // hologram speaks (src/build/ghost.js draws a row of chevrons along the lane), so a placed switch
+    // and the hologram of one say "items go this way" the same way.
+    //
+    // Both sit on the OUTBOUND half. The first draft put the dimmer one at the tile's entry, which
+    // looked right on paper and was wrong on screen: the switch's model carries a warn-coloured
+    // button at exactly that end, so the marker landed on top of it and the tile grew a confusing
+    // double blob of orange where its one control is. Anything drawn on this machine has to stay
+    // clear of the button.
+    along: 0.8,
+    tailAlong: 0.5,
+    // Clear of the deck and of the mast the model carries, so the trail reads as a label floating
+    // over the machine rather than as another part bolted to it.
+    lift: 0.42,
+    size: 0.11,
+    color: '#f5a524',
+    opacity: 0.95,
+    tailOpacity: 0.42,
+    // Ceiling on how many switch markers are drawn. Beyond this the factory is a forest of chevrons
+    // and the markers stop being information; the inspector still answers for any individual one.
+    max: 256,
+    // Seconds between rebuilds of the marker set. The markers are only rebuilt when the switch
+    // population or a setting changed, and this poll is what NOTICES that — it does not itself write.
+    poll: 0.25,
+  },
+
+  copy: {
+    label: 'Output',
+    hint: 'click the tile, or T',
+    toggle: 'Flip output',
+    dead: 'leads nowhere',
+  },
 };

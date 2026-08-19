@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { GRID, FLOW, ECONOMY, AUDIO, FX } from '../config.js';
 import { createGrid, dirBetween, turnLeft, turnRight } from './grid.js';
-import { BUILDINGS, ITEM_MODELS, GEOMETRIES, MATERIALS, PANE_MATERIALS, LIGHT_MATERIALS, getDef, paneColorFor, isBeltLike } from './buildings.js';
+import { BUILDINGS, ITEM_MODELS, GEOMETRIES, MATERIALS, PANE_MATERIALS, LIGHT_MATERIALS, getDef, paneColorFor, isBeltLike, isSwitch, hasFilter } from './buildings.js';
 import { TIERS } from './items.js';
 import { createFlow } from './belt.js';
 import { createItemInstancer, createPartInstancer, createLabelPool } from '../render/instancing.js';
@@ -176,7 +176,10 @@ export async function createWorld(view, orbit) {
     onSell,
   });
 
-  flow.setDeliverHook((tier, n) => orders.deliver(tier, n));
+  // The Delivery Pad needs BOTH channels: the credit hook and the live "what is wanted" set. Handing
+// setDeliverHook the orders object wires both; the arrow form only wired the credit, which left the
+// pad accepting everything at the plain rate — inert, not broken, and easy to miss.
+flow.setDeliverHook(orders);
 
   const lightGeo = new THREE.BoxGeometry(1, 1, 1);
 
@@ -691,11 +694,17 @@ export async function createWorld(view, orbit) {
   function restore(data) {
     let skipped = 0;
     for (const entry of data.b) {
-      const [rawId, cx, cz, rawRot] = entry;
+      const [rawId, cx, cz, rawRot, state] = entry;
       const { id, rot } = migrate(rawId, rawRot);
       // One unrecognised building must never cost the player everything else they built.
       if (!getDef(id)) { skipped += 1; continue; }
-      place(id, cx, cz, rot, { free: true });
+      const b = place(id, cx, cz, rot, { free: true });
+      // Hand-set state (a Switch's arm, a pad's material) is restored through the sim's own setters
+      // rather than by assigning the field, so the lane bookkeeping that depends on it is rebuilt too.
+      if (b && state !== undefined) {
+        if (isSwitch(b.def)) flow.setSwitch(b, state | 0);
+        else if (hasFilter(b.def)) flow.setFilter(b, state | 0);
+      }
     }
     if (skipped) console.warn(`[voidworks] save restored with ${skipped} unknown building(s) skipped`);
     applyUpgradeSave(data.u, buildings.values());

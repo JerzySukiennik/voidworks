@@ -1,7 +1,7 @@
 // Voidworks — the buildable catalogue: footprints, costs, lane geometry, behaviour and primitive part lists.
 
 import * as THREE from 'three';
-import { GRID, FLOW, PALETTE, PANES, SORTER } from '../config.js';
+import { GRID, FLOW, PALETTE, PANES, SORTER, SWITCH } from '../config.js';
 import { tierColor } from './items.js';
 
 const BY = GRID.beltY;
@@ -244,19 +244,19 @@ const LIGHT_BIG = { p: [-0.34, 1.0, 0.5], s: [0.2, 0.2, 0.2] };
 export const BUILDINGS = [
   // ---- droppers
   def({
-    id: 'dropper_scrap', name: 'Scrap Dropper', family: 'dropper', cost: 200,
+    id: 'dropper_scrap', name: 'Scrap Dropper', family: 'dropper', cost: 2800,
     desc: 'Drops slag and iron onto the belt in front of it. Cheap, and it fills your item cap fast.',
     drop: { rate: 1.1, min: 0, max: 1 },
     parts: dropperParts(1, 'steelLight'), light: LIGHT,
   }),
   def({
-    id: 'dropper_ore', name: 'Ore Dropper', family: 'dropper', cost: 1400, unlock: 1,
+    id: 'dropper_ore', name: 'Ore Dropper', family: 'dropper', cost: 11000, unlock: 1,
     desc: 'Slower, but every slot it uses holds copper or better.',
     drop: { rate: 0.8, min: 1, max: 2 },
     parts: dropperParts(1, 'warn'), light: LIGHT,
   }),
   def({
-    id: 'dropper_deep', name: 'Deep Drill', family: 'dropper', cost: 12000, unlock: 2,
+    id: 'dropper_deep', name: 'Deep Drill', family: 'dropper', cost: 96000, unlock: 2,
     desc: 'A heavy rig pulling cobalt and aurite out of nothing.',
     drop: { rate: 0.55, min: 3, max: 4 },
     parts: [
@@ -266,7 +266,7 @@ export const BUILDINGS = [
     light: LIGHT,
   }),
   def({
-    id: 'dropper_void', name: 'Void Extractor', family: 'dropper', cost: 250000, unlock: 4,
+    id: 'dropper_void', name: 'Void Extractor', family: 'dropper', cost: 4000000, unlock: 4,
     desc: 'One slow, perfect item at a time: voidglass, and rarely singularite.',
     drop: { rate: 0.32, min: 5, max: 6 },
     parts: [
@@ -281,24 +281,24 @@ export const BUILDINGS = [
 
   // ---- conveyors
   def({
-    id: 'belt', name: 'Conveyor', family: 'belt', cost: 25,
+    id: 'belt', name: 'Conveyor', family: 'belt', cost: 350,
     desc: 'Carries items forward. Accepts a feed from either side. Every tile of belt holds items that are not selling yet.',
     lanes: [straightLane(1)], parts: beltParts(1),
   }),
   def({
-    id: 'belt_fast', name: 'Fast Conveyor', family: 'belt', cost: 140, unlock: 1,
+    id: 'belt_fast', name: 'Fast Conveyor', family: 'belt', cost: 1100, unlock: 1,
     desc: 'Same belt, 80% quicker — items spend less of their life in transit.',
     speed: FLOW.beltSpeed * 1.8,
     lanes: [straightLane(1)],
     parts: [...beltParts(1), part('box', 'accent', 0, BY + 0.03, 0, 0.9, 0.05, 0.2)],
   }),
   def({
-    id: 'belt_turn', name: 'Curve', family: 'belt', cost: 30,
+    id: 'belt_turn', name: 'Curve', family: 'belt', cost: 420,
     desc: 'Turns the run 90 degrees. Rotate it with R to face any corner — items run through it whichever way you feed it.',
     lanes: [turnLeftLane(), turnLeftBackLane()], parts: cornerParts(-1),
   }),
   def({
-    id: 'belt_merge', name: 'Merger', family: 'belt', cost: 110,
+    id: 'belt_merge', name: 'Merger', family: 'belt', cost: 1500,
     desc: 'Three feeds in, one line out.',
     lanes: [straightLane(1), mergeFromLeft(), mergeFromRight()],
     parts: [
@@ -308,7 +308,7 @@ export const BUILDINGS = [
     ],
   }),
   def({
-    id: 'belt_split', name: 'Splitter', family: 'belt', cost: 140, unlock: 1,
+    id: 'belt_split', name: 'Splitter', family: 'belt', cost: 1100, unlock: 1,
     desc: 'Sends each item to a different exit in turn: straight, left, right.',
     lanes: [straightLane(1), turnLeftLane(), turnRightLane()],
     parts: [
@@ -322,7 +322,7 @@ export const BUILDINGS = [
   // Non-matching material runs STRAIGHT through; the filtered tier turns off to the left arm.
   // `noDrag` because a dragged run of sorters is never what anyone meant by dragging.
   def({
-    id: 'sorter', name: 'Sorter', family: 'belt', cost: 300, unlock: 1,
+    id: 'sorter', name: 'Sorter', family: 'belt', cost: 2400, unlock: 1,
     desc: 'Reads every item. The material it is set to turns left; everything else carries straight on. Cycle the material with F.',
     sort: true, filter: true, noDrag: true,
     lanes: [
@@ -340,57 +340,88 @@ export const BUILDINGS = [
       part('cyl', 'warn', 0.24, BY + 0.07, -0.24, 0.2, 0.14, 0.2),
     ],
   }),
+  // A splitter answers "where next?" with "somewhere else this time"; a sorter answers it with
+  // "what are you?". A switch answers it with "wherever the player last put me" — a manual points,
+  // not an automatic anything. Three arms, exactly ONE of them live, and it holds until clicked
+  // again. The click handling and the button's lit state belong to the input/UI piece; the flow
+  // exposes `toggleSwitch` / `setSwitch` / `switchOf` and nothing else.
+  // `noDrag` for the same reason the sorter has it: a dragged run of switches is never what anyone
+  // meant by dragging.
   def({
-    id: 'belt_ramp_up', name: 'Ramp Up', family: 'belt', cost: 90, unlock: 1,
+    id: 'belt_switch', name: 'Switch', family: 'belt', cost: 1400, unlock: 1,
+    switchable: true, noDrag: true,
+    desc: 'One way in, three ways out — but only one is open at a time. Press the button on it to turn the line straight, left or right. It stays where you put it.',
+    lanes: [
+      straightLane(1, 0, 0, { arm: 0 }),
+      lane(arcPts(-0.5, -0.5, 0.5, H, 0, 0), 0, 1, [0, 0], [0, 0], { arm: 1 }),
+      lane(arcPts(-0.5, 0.5, 0.5, -H, 0, 0), 0, 3, [0, 0], [0, 0], { arm: 2 }),
+    ],
+    parts: [
+      ...beltParts(1),
+      // The turnout itself: a stubby housing on the outbound half, so the tile reads as a mechanism
+      // rather than a plain belt with a light on it.
+      part('box', 'steelDark', 0.16, BY - 0.15, 0, 0.58, 0.21, 1.0),
+      // The button. A raised pedestal and a cap on top of it, off to one side of the belt so nothing
+      // riding through can hide it. This is an affordance only — the input piece owns what a click
+      // on it does, and owns any lit/pressed state it wants to drive off `flow.switchOf(b)`.
+      part('cyl', 'steelDark', -0.3, BY + 0.12, -0.36, 0.26, 0.3, 0.26),
+      part('cyl', 'warn', -0.3, BY + 0.29, -0.36, 0.22, 0.08, 0.22),
+      // A short mast beside the button: somewhere for the UI to hang a direction arrow later, and
+      // enough silhouette that a switch is not a plain conveyor from across the factory.
+      part('box', 'steelDark', -0.3, BY + 0.34, 0.4, 0.1, 0.62, 0.1),
+    ],
+  }),
+  def({
+    id: 'belt_ramp_up', name: 'Ramp Up', family: 'belt', cost: 720, unlock: 1,
     levels: [0, 1],
     desc: 'Lifts the line to the upper deck so two runs can cross.',
     lanes: [straightLane(1, 0, RISE)],
     parts: [...beltParts(1, RISE * 0.5), part('box', 'steelDark', 0, BY + RISE * 0.25 - 0.3, 0, 0.98, 0.3, 0.72)],
   }),
   def({
-    id: 'belt_ramp_down', name: 'Ramp Down', family: 'belt', cost: 90, unlock: 1,
+    id: 'belt_ramp_down', name: 'Ramp Down', family: 'belt', cost: 720, unlock: 1,
     levels: [0, 1],
     desc: 'Brings the upper deck back down to the main line.',
     lanes: [straightLane(1, RISE, 0)],
     parts: [...beltParts(1, RISE * 0.5), part('box', 'steelDark', 0, BY + RISE * 0.25 - 0.3, 0, 0.98, 0.3, 0.72)],
   }),
   def({
-    id: 'belt_elev', name: 'Sky Conveyor', family: 'belt', cost: 45, unlock: 1,
+    id: 'belt_elev', name: 'Sky Conveyor', family: 'belt', cost: 360, unlock: 1,
     levels: [1], desc: 'Runs on the upper deck, straight over a belt below.',
     lanes: [straightLane(1, RISE, RISE)],
     parts: [...beltParts(1, RISE, RISE), part('box', 'steelDark', 0, BY + RISE - 0.32, 0, 0.34, 0.34, 0.34)],
   }),
   def({
-    id: 'belt_sky_turn', name: 'Sky Curve', family: 'belt', cost: 55, unlock: 1,
+    id: 'belt_sky_turn', name: 'Sky Curve', family: 'belt', cost: 440, unlock: 1,
     levels: [1], desc: 'Turns the upper deck 90 degrees. Rotate it with R to face any corner.',
     lanes: [turnLeftLane(RISE), turnLeftBackLane(RISE)],
     parts: [...cornerParts(-1, RISE), part('box', 'steelDark', 0, BY + RISE - 0.32, 0, 0.34, 0.34, 0.34)],
   }),
 
   // ---- adders: flat value, worth the most on cheap material
-  adder('add_tack', 'Tack Welder', 5, 150, 0, 0.25, 'A flat +5 on anything that rides through. Pennies — but pennies on slag is a lot.'),
-  adder('add_stamp', 'Stamper', 20, 700, 0, 0.3, 'Flat +20. On slag that is triple value; on aurite it is a rounding error.'),
-  adder('add_plate', 'Plating Press', 75, 4000, 1, 0.35, 'Flat +75. The backbone of a mid-game adder line.'),
-  adder('add_inject', 'Alloy Injector', 300, 26000, 2, 0.4, 'Flat +300, for lines that already run cobalt and up.'),
-  adder('add_infuse', 'Void Infuser', 1200, 190000, 4, 0.5, 'Flat +1200. Only earns its keep in front of big multipliers.'),
+  adder('add_tack', 'Tack Welder', 5, 2100, 0, 0.25, 'A flat +5 on anything that rides through. Pennies — but pennies on slag is a lot.'),
+  adder('add_stamp', 'Stamper', 20, 9800, 0, 0.3, 'Flat +20. On slag that is triple value; on aurite it is a rounding error.'),
+  adder('add_plate', 'Plating Press', 75, 32000, 1, 0.35, 'Flat +75. The backbone of a mid-game adder line.'),
+  adder('add_inject', 'Alloy Injector', 300, 210000, 2, 0.4, 'Flat +300, for lines that already run cobalt and up.'),
+  adder('add_infuse', 'Void Infuser', 1200, 3000000, 4, 0.5, 'Flat +1200. Only earns its keep in front of big multipliers.'),
 
   // ---- multipliers: scale, worth the most on expensive material
-  multiplier('mul_125', 'Buffer Wheel', 1.25, 400, 0, 0.5, 'x1.25. Deliberately feeble, and the first multiplier you can afford.'),
-  multiplier('mul_15', 'Refiner', 1.5, 2600, 1, 0.6, 'x1.5. Put it AFTER your adders — it multiplies whatever they put in.'),
-  multiplier('mul_2', 'Crucible', 2, 15000, 2, 0.8, 'x2. Doubles everything upstream of it.'),
-  multiplier('mul_3', 'Reactor', 3, 78000, 3, 1.0, 'x3. Wants an expensive item and a long adder line in front.'),
-  multiplier('mul_5', 'Nova Press', 5, 340000, 4, 1.4, 'x5. Late-line hardware.'),
-  multiplier('mul_10', 'Singularity Gate', 10, 1600000, 5, 2.0, 'x10. The last gate on the belt.'),
-  multiplier('mul_gamble', 'Gamble Press', 5, 60000, 3, 3.0,
+  multiplier('mul_125', 'Buffer Wheel', 1.25, 5600, 0, 0.5, 'x1.25. Deliberately feeble, and the first multiplier you can afford.'),
+  multiplier('mul_15', 'Refiner', 1.5, 21000, 1, 0.6, 'x1.5. Put it AFTER your adders — it multiplies whatever they put in.'),
+  multiplier('mul_2', 'Crucible', 2, 120000, 2, 0.8, 'x2. Doubles everything upstream of it.'),
+  multiplier('mul_3', 'Reactor', 3, 780000, 3, 1.0, 'x3. Wants an expensive item and a long adder line in front.'),
+  multiplier('mul_5', 'Nova Press', 5, 5400000, 4, 1.4, 'x5. Late-line hardware.'),
+  multiplier('mul_10', 'Singularity Gate', 10, 26000000, 5, 2.0, 'x10. The last gate on the belt.'),
+  multiplier('mul_gamble', 'Gamble Press', 5, 600000, 3, 3.0,
     'x5 — with a 20% chance the item is crushed to nothing. Fires once per item.',
     { upg: { kind: 'gamble', amount: 5, destroy: 0.2, cooldown: 3, once: true }, label: 'x5?' }),
-  multiplier('mul_transmute', 'Transmuter', 1, 45000, 3, 6,
+  multiplier('mul_transmute', 'Transmuter', 1, 450000, 3, 6,
     'Raises the item one whole tier. Only ever fires once per item.',
     { upg: { kind: 'tier', cooldown: 6, once: true }, label: 'tier+' }),
 
   // ---- terminals
   def({
-    id: 'sellpad', name: 'Sell Pad', family: 'sell', cost: 400,
+    id: 'sellpad', name: 'Sell Pad', family: 'sell', cost: 5600,
     rotatable: false,
     desc: 'Anything that touches it turns into money and frees the slot it was using.',
     // One cell, and deliberately the plainest object in the game: a green square. It is the loudest
@@ -406,10 +437,14 @@ export const BUILDINGS = [
   // it and most of what you sell is worth a third of its value. The exact numbers, and the proof
   // that sorting into it beats a plain pad, live in SELLPAD in config.js.
   def({
-    id: 'sellpad_tier', name: 'Contract Pad', family: 'sell', cost: 2500, unlock: 1,
+    id: 'sellpad_tier', name: 'Delivery Pad', family: 'sell', cost: 20000, unlock: 1,
     rotatable: false,
-    tierPad: true, filter: true,
-    desc: 'Pays 2.2x for the one material it is set to and only 0.35x for everything else. Feed it from a sorter. Deliveries here are what fill orders. Cycle the material with F.',
+    // `tierPad` is kept as the flag other pieces already branch on; `delivery` is the name that
+    // describes what it now does. There is deliberately NO `filter` any more — the pad has no
+    // material setting to cycle, so `hasFilter()` is false for it and every filter affordance in the
+    // UI drops away on its own instead of each panel having to special-case the id.
+    tierPad: true, delivery: true,
+    desc: 'Accepts only what the order board is asking for right now, and pays 2.2x for it. Anything else that lands on it is destroyed — no money back. Feed it from a sorter. With no order open it sells everything at the plain rate.',
     lanes: sinkLanes([[0, 0]], 0, 0, 0),
     parts: [
       part('box', 'accentDeep', 0, BY - 0.17, 0, 1.0, 0.22, 1.0),
@@ -423,7 +458,7 @@ export const BUILDINGS = [
     ],
   }),
   def({
-    id: 'buffer', name: 'Buffer Vault', family: 'store', cost: 1200, unlock: 1,
+    id: 'buffer', name: 'Buffer Vault', family: 'store', cost: 9600, unlock: 1,
     // 16 slots, not 90: at a starting cap of 100 a 90-slot vault swallowed almost the whole factory
     // for $1200, while the real capacity upgrade buys 15 for $2000. A vault smooths a burst; it is
     // not a way to warehouse the game.
@@ -441,7 +476,7 @@ export const BUILDINGS = [
     ],
   }),
   def({
-    id: 'furnace', name: 'Fusion Furnace', family: 'store', cost: 9000, unlock: 2,
+    id: 'furnace', name: 'Fusion Furnace', family: 'store', cost: 72000, unlock: 2,
     desc: 'Melts 4 items into one of the next tier up, worth 1.25x the pile — and frees 3 slots doing it.',
     fuse: { need: 4, bonus: 1.25 },
     lanes: [
@@ -484,6 +519,12 @@ const MODEL_FOR = {
   // make the two pads pixel-identical, which is worse than the primitives.
   sorter: 'sorter',
   sellpad_tier: 'sellpad-tier',
+  // Its own mesh, not belt-splitter.glb: a switch that looked identical to a splitter would be worse
+  // than primitives, because the two make opposite promises about where an item goes. It is built
+  // FROM the splitter (work/blender/vwbuild2.py `_belt_switch`) so the pair keeps one plinth and one
+  // junction silhouette, and differs where it matters — the splitter's three equal amber arrows say
+  // the stream divides; the switch's single raised amber button says you press it to choose.
+  belt_switch: 'belt-switch',
 };
 
 export const ITEM_MODELS = [
@@ -585,6 +626,22 @@ export function isBeltLike(d) {
 // Does this definition carry a per-building "which material" setting? Sorter and Contract Pad do;
 // nothing else does. One predicate, so the UI never has to enumerate ids.
 export function hasFilter(d) { return !!d && !!d.filter; }
+
+// Does this definition carry a per-building EXIT setting the player flips by hand? Only the switch
+// conveyor does. Same shape as hasFilter() so the UI can ask one question per affordance.
+export function isSwitch(d) { return !!d && !!d.switchable; }
+
+// The world direction (0..3, relative to rot = 0) each switch arm leaves by, in cycle order. Read
+// off the lane specs rather than restated, so an arm cannot be drawn pointing one way and route the
+// other. Add b.rot and mask with 3 for the direction a PLACED switch's arm faces.
+export const SWITCH_ARM_DIRS = (() => {
+  const d = getDefRaw('belt_switch');
+  const out = [];
+  for (const l of d.lanes) out[l.arm] = l.outDir;
+  return out;
+})();
+
+export function switchArmLabel(i) { return SWITCH.labels[i] || `Arm ${i}`; }
 
 // The colour the authored glb's `pane` slot should be tinted to for a given filtered tier — and the
 // swatch the UI should print next to the building. Derived from the item table so it can never drift

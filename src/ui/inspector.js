@@ -9,8 +9,9 @@
 //      through `put()`, which compares against the last value it wrote and counts the ones that get
 //      through — `api.writes` is that counter, and work/tools/inspectortest.mjs asserts on it.
 
-import { INSPECTOR, BUILDBAR, ITEMS } from '../config.js';
-import { paneColorFor } from '../world/buildings.js';
+import { INSPECTOR, BUILDBAR, ITEMS, PAD_UI, SWITCH_UI, DELIVERY } from '../config.js';
+import { paneColorFor, hasFilter } from '../world/buildings.js';
+import { createSwitchApi } from '../build/switch-api.js';
 
 const C = BUILDBAR.colors;
 const COPY = INSPECTOR.copy;
@@ -57,6 +58,30 @@ const CSS = `
 .vw-insp-grid b.warn{color:${C.risk}}
 .vw-insp-mat{display:flex;align-items:center;gap:5px}
 .vw-insp-mat i{width:7px;height:7px;border-radius:2px;flex:none;box-shadow:0 0 0 1px rgba(26,29,34,.14) inset}
+/* The delivery pad can want more than one material at once, so the swatch is a ROW of swatches. It
+   collapses to nothing when the board is empty, which is what makes "nothing wanted" look different
+   from "wanted: copper" at a glance rather than only on reading. */
+.vw-insp-dots{display:flex;gap:3px;flex:none}
+.vw-insp-mat.idle span{color:${C.risk}}
+
+/* The switch's control. A row, not a panel: it is one fact and one verb, and it sits directly under
+   the grid because "which way is this pointing" is the same kind of question as "which cell is it in". */
+.vw-insp-sw{margin-top:12px;padding-top:11px;border-top:1px solid ${C.faint};display:none}
+.vw-insp-sw.on{display:block}
+.vw-insp-swrow{margin-top:7px;display:flex;align-items:center;gap:8px}
+.vw-insp-swdir{display:flex;align-items:center;gap:6px;min-width:0}
+.vw-insp-swdir i{width:0;height:0;flex:none;border-top:5px solid transparent;border-bottom:5px solid transparent;
+  border-left:8px solid ${C.risk};transition:transform .18s ${EASE}}
+.vw-insp-swdir b{font-size:12.5px;font-weight:700;color:${C.ink};white-space:nowrap}
+.vw-insp-swdead{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:${C.risk}}
+.vw-insp-swbtn{margin-left:auto;flex:none;padding:7px 11px;border-radius:9px;cursor:pointer;font:inherit;
+  font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  border:1px solid rgba(26,29,34,.16);color:${C.ink};background:rgba(255,255,255,.7);
+  transition:background .16s ease,border-color .16s ease,transform .16s ${EASE}}
+.vw-insp-swbtn:hover{background:#fff;border-color:${C.accent};transform:translateY(-1px)}
+.vw-insp-swbtn:active{transform:none}
+.vw-insp-swbtn:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(23,201,100,.22)}
+.vw-insp-swnote{margin-top:7px;font-size:10px;line-height:1.4;color:${C.dim}}
 
 .vw-insp-up{margin-top:12px;padding-top:11px;border-top:1px solid ${C.faint}}
 .vw-insp-lab{font-size:8.5px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:${C.dim}}
@@ -121,6 +146,7 @@ function shortMoney(n) {
 const BELT_EFFECT = {
   belt_turn: 'corner', belt_merge: '3→1', belt_split: '1→3',
   belt_ramp_up: 'up', belt_ramp_down: 'down', belt_elev: 'deck',
+  belt_switch: '1→1', sorter: 'sort',
 };
 
 function effectOf(def) {
@@ -131,6 +157,7 @@ function effectOf(def) {
     if (def.upg.kind === 'flat') return `+${def.upg.amount}`;
     return `×${def.upg.amount}`;
   }
+  if (isOrderPad(def)) return `×${DELIVERY.wantedMult}`;
   if (def.id === 'sellpad' || def.family === 'sell') return 'sell';
   if (def.store) return `${def.store.cap} held`;
   if (def.fuse) return '4 → 1';
@@ -149,11 +176,25 @@ function longEffectOf(def) {
     if (def.upg.destroy) return `×${def.upg.amount} value, ${Math.round(def.upg.destroy * 100)}% chance to destroy`;
     return `×${def.upg.amount} item value`;
   }
-  if (def.tierPad) return 'Pays 2.2× for its material, 0.35× for the rest';
+  // Was 'Pays 2.2x for its material, 0.35x for the rest' — a sentence about a machine that no longer
+  // exists. The pad has no material of its own any more and does not discount the misses, it
+  // destroys them, and both numbers come off DELIVERY rather than being written out again here.
+  if (isOrderPad(def)) return `×${DELIVERY.wantedMult} for a material an order wants — everything else destroyed`;
   if (def.family === 'sell') return 'Converts an item to money, frees its slot';
   if (def.store) return `Holds ${def.store.cap}, releases ${def.store.rate}/s`;
   if (def.fuse) return `4 items → 1 of the next tier at ×${def.fuse.bonus}`;
   return '—';
+}
+
+// Is this the pad that reads the order board? Asked by SHAPE rather than by id wherever possible,
+// because the sim builder is reworking exactly this definition while this file is being written: the
+// pad may keep `tierPad`, gain `orderPad`, or carry neither and be known only by its id. All three
+// answer yes, and a pad that still has a manual filter is deliberately NOT one — a definition that
+// still asks the player to pick a material gets the Material row, which is then still the truth.
+function isOrderPad(def) {
+  if (!def || def.family !== 'sell') return false;
+  if (hasFilter(def)) return false;
+  return !!(def.orderPad || def.delivery || def.tierPad || def.id === 'sellpad_tier');
 }
 
 function familyOf(def) {
@@ -282,11 +323,13 @@ export function createInspector(world, opts) {
   const effLongEl = el('span', null, effWrap);
 
   const grid = el('div', 'vw-insp-grid', root);
+  // The label is returned as well as the value: the delivery pad's row is not "Material" any more,
+  // and a row whose caption cannot change would have to be a second row sitting permanently empty.
   function cell(label) {
     const box = el('div', null, grid);
-    el('span', null, box, label);
+    const cap = el('span', null, box, label);
     const value = el('b', null, box);
-    return { box, value };
+    return { box, cap, value };
   }
   const cThroughput = cell(COPY.throughput);
   const cRefund = cell(COPY.refund);
@@ -294,9 +337,23 @@ export function createInspector(world, opts) {
   const cCell = cell(COPY.cell);
   const cMaterial = cell(COPY.material);
   cMaterial.value.className = 'vw-insp-mat';
-  const matDot = el('i', null, cMaterial.value);
+  const matDots = el('span', 'vw-insp-dots', cMaterial.value);
   const matText = el('span', null, cMaterial.value);
   matText.style.cssText = 'font-size:11.5px;font-weight:600;letter-spacing:0;text-transform:none;color:inherit';
+
+  // --- the switch's row -------------------------------------------------------
+  // Hidden entirely on every other machine. A dead control on 30 buildings is how a player learns to
+  // stop reading a corner of the panel.
+  const swWrap = el('div', 'vw-insp-sw', root);
+  el('div', 'vw-insp-lab', swWrap, SWITCH_UI.copy.label);
+  const swRow = el('div', 'vw-insp-swrow', swWrap);
+  const swDir = el('div', 'vw-insp-swdir', swRow);
+  const swArrow = el('i', null, swDir);
+  const swName = el('b', null, swDir);
+  const swDead = el('span', 'vw-insp-swdead', swDir);
+  const swBtn = el('button', 'vw-insp-swbtn', swRow, SWITCH_UI.copy.toggle);
+  swBtn.type = 'button';
+  const swNote = el('div', 'vw-insp-swnote', swWrap);
 
   const up = el('div', 'vw-insp-up', root);
   el('div', 'vw-insp-lab', up, COPY.upgrades);
@@ -322,6 +379,7 @@ export function createInspector(world, opts) {
     writes += 1;
     if (key.endsWith('|cls')) node.className = value;
     else if (key.endsWith('|bg')) node.style.background = value;
+    else if (key.endsWith('|tf')) node.style.transform = value;
     else node.textContent = value;
     return true;
   }
@@ -341,6 +399,65 @@ export function createInspector(world, opts) {
   let acc = 0;
   let upgrades = bindUpgrades((opts && opts.upgrades) || world.upgrades || null);
   let pipCount = 0;
+  const switches = createSwitchApi(world);
+
+  // What the delivery pad will accept RIGHT NOW. Returns an array of tier indices, or null when
+  // nothing in the build can answer — which is a different state from "wants nothing" and is printed
+  // differently, because a panel that says "nothing wanted" while the order module is simply missing
+  // would be inventing a fact.
+  //
+  // Probed in three steps, most authoritative first: a sim function if belt.js grew one, a field the
+  // sim baked onto the building, and finally the order board itself. The board is the fallback rather
+  // than the primary because the sim is entitled to a rule this panel has not been told about.
+  const ACCEPT_FNS = ['acceptedTiers', 'acceptsOf', 'wantedTiers', 'padAccepts'];
+
+  function wantedTiers(b) {
+    const f = world.flow;
+    if (f) {
+      for (let i = 0; i < ACCEPT_FNS.length; i += 1) {
+        const fn = f[ACCEPT_FNS[i]];
+        if (typeof fn !== 'function') continue;
+        const r = fn.call(f, b);
+        if (Array.isArray(r)) return r.slice().sort((x, y) => x - y);
+      }
+    }
+    if (b && Array.isArray(b.accepts)) return b.accepts.slice().sort((x, y) => x - y);
+
+    const o = world.orders;
+    if (!o || typeof o.active !== 'function') return null;
+    if (o.enabled === false) return [];
+    const list = o.active() || [];
+    const out = [];
+    for (let i = 0; i < list.length; i += 1) {
+      const ord = list[i];
+      if (!ord || !Number.isFinite(ord.tier)) continue;
+      // An order already at its quota is not asking for anything, even in the beat before its slot
+      // clears. Showing it would send the player one more crate that the pad then destroys.
+      if (Number.isFinite(ord.need) && Number.isFinite(ord.done) && ord.done >= ord.need) continue;
+      if (out.indexOf(ord.tier) < 0) out.push(ord.tier);
+    }
+    return out.sort((x, y) => x - y);
+  }
+
+  // With DELIVERY.idleMult above zero an empty board is not a failure — the pad falls back to paying
+  // a flat rate, exactly like a plain sell pad — so the copy has to be chosen from the number rather
+  // than from an assumption about it. Retune idleMult to 0 and this row starts saying "destroying".
+  function idleIsDestructive() {
+    const m = DELIVERY && Number.isFinite(DELIVERY.idleMult) ? DELIVERY.idleMult : 1;
+    return !(m > 0);
+  }
+
+  function paintDots(colors) {
+    const key = colors.join('|');
+    if (last.get('dots') === key) return;
+    last.set('dots', key);
+    writes += 1;
+    matDots.textContent = '';
+    for (let i = 0; i < colors.length; i += 1) {
+      const n = el('i', null, matDots);
+      n.style.background = colors[i];
+    }
+  }
 
   function tierOf(b) {
     const f = world.flow;
@@ -386,22 +503,105 @@ export function createInspector(world, opts) {
       status = def.upg.once ? 'Once per item' : `${num(def.upg.cooldown)}s cooldown`;
     } else if (def.family === 'belt') {
       status = def.levels[0] === 1 ? 'Upper deck' : 'Ground';
+    } else if (isOrderPad(def)) {
+      // A pad with an empty board and a pad filling three contracts are doing completely different
+      // things to the items that land on them, so they must not print the same word.
+      const w = wantedTiers(b);
+      if (w === null) status = PAD_UI.unknown;
+      else if (w.length) status = PAD_UI.statusWanted;
+      else if (idleIsDestructive()) { status = PAD_UI.statusIdleDestroy; bad = true; }
+      else status = PAD_UI.statusIdleFlat;
     } else if (def.family === 'sell') {
       status = COPY.running;
     }
     put(cStatus.value, 'status', status);
     put(cStatus.value, 'status|cls', bad ? 'warn' : '');
 
-    const hasFilter = !!def.filter;
-    show(cMaterial.box, 'mat|show', hasFilter);
-    if (hasFilter) {
+    // Two different rows sharing one slot, because they answer the same question and never both
+    // apply. `hasFilter` is asked of the CATALOGUE, not of a list of ids kept here — the moment
+    // buildings.js stops giving the delivery pad a filter, this row stops offering it a choice, with
+    // no edit on this side. A row that claimed a material could be picked on a pad that no longer
+    // has one would be the panel lying about the machine, which is the one thing it may not do.
+    const filt = hasFilter(def);
+    const pad = isOrderPad(def);
+    show(cMaterial.box, 'mat|show', filt || pad);
+
+    if (filt) {
+      put(cMaterial.cap, 'mat|cap', COPY.material);
       const t = ITEMS.tiers[Math.max(0, Math.min(ITEMS.tiers.length - 1, tierOf(b) | 0))];
-      put(matDot, 'mat|bg', t.color);
+      paintDots([t.color]);
+      put(cMaterial.value, 'mat|cls', 'vw-insp-mat');
       put(matText, 'mat', `${t.name} · ${COPY.materialHint}`);
+    } else if (pad) {
+      put(cMaterial.cap, 'mat|cap', PAD_UI.label);
+      const w = wantedTiers(b);
+      if (w === null) {
+        paintDots([]);
+        put(cMaterial.value, 'mat|cls', 'vw-insp-mat');
+        put(matText, 'mat', PAD_UI.unknown);
+      } else if (!w.length) {
+        // No swatches at all, and the text goes red: an empty row is the fastest possible read of
+        // "this pad currently wants nothing", before a single word has been processed.
+        paintDots([]);
+        put(cMaterial.value, 'mat|cls', 'vw-insp-mat idle');
+        put(matText, 'mat', idleIsDestructive() ? PAD_UI.idleDestroy : PAD_UI.idleFlat);
+      } else {
+        const tiers = ITEMS.tiers;
+        const clamp = (t) => tiers[Math.max(0, Math.min(tiers.length - 1, t | 0))];
+        paintDots(w.map((t) => clamp(t).color));
+        const names = w.slice(0, PAD_UI.maxNames).map((t) => clamp(t).name);
+        const extra = w.length - names.length;
+        put(cMaterial.value, 'mat|cls', 'vw-insp-mat');
+        put(matText, 'mat', names.join(PAD_UI.join) + (extra > 0 ? ` +${extra}` : ''));
+      }
     }
 
+    refreshSwitch(force);
     refreshUpgrades(force);
   }
+
+  // Rotations of the little arrow, in the panel's own top-down frame: straight points the way the
+  // tile faces, left is up the screen, right is down it. Read off the arm index rather than off the
+  // world so a rotated switch still shows its arm relative to itself, which is how the labels read.
+  const ARM_SPIN = [0, -90, 90, 180];
+
+  function refreshSwitch(force) {
+    const b = target;
+    const isSw = switches.isSwitch(b.def);
+    const key = isSw ? '1' : '0';
+    if (force || last.get('sw|on') !== key) {
+      last.set('sw|on', key);
+      writes += 1;
+      swWrap.classList.toggle('on', isSw);
+    }
+    if (!isSw) return;
+
+    const arm = switches.armOf(b);
+    put(swName, 'sw|name', switches.label(arm));
+    put(swArrow, 'sw|tf', `rotate(${ARM_SPIN[arm] === undefined ? 0 : ARM_SPIN[arm]}deg)`);
+    // An arm pointed at open floor is legal and spills into the void, exactly like a dead-ended
+    // belt. Legal is not the same as intended, so it is named rather than hidden.
+    put(swDead, 'sw|dead', switches.armIsDead(b) ? SWITCH_UI.copy.dead : '');
+    // If the sim half has not landed, the panel says so instead of implying the belt has rerouted.
+    // This is the honest version of degrading gracefully: the control still works and still moves the
+    // building's own state, and the player is not told a lie about what that state is doing yet.
+    put(swNote, 'sw|note', switches.live ? SWITCH_UI.copy.hint
+      : `${SWITCH_UI.copy.hint} · routing engine not loaded`);
+  }
+
+  // The panel's half of the control. placement.js owns the click on the machine itself and the T key;
+  // all three go through the SAME adapter, and all three announce on `world.onSwitchChanged`, so the
+  // world marker repaints in the same gesture rather than on the next poll and the panel and the
+  // factory floor can never be showing two different answers for one switch.
+  function flip() {
+    if (!open || !target || !switches.isSwitch(target.def)) return -1;
+    const r = switches.toggle(target);
+    world.audio?.play?.(r >= 0 ? 'ui-click' : 'denied');
+    if (typeof world.onSwitchChanged === 'function') world.onSwitchChanged(target, r);
+    refresh(false);
+    return r;
+  }
+  swBtn.addEventListener('click', flip);
 
   function refreshUpgrades(force) {
     const b = target;
@@ -597,6 +797,10 @@ export function createInspector(world, opts) {
     openFor,
     close,
     buy,
+    // Test/debug surface for the switch control: the same call the button makes, and the adapter's
+    // probe, so a suite can prove WHICH sim names it found rather than inferring it from behaviour.
+    flipSwitch: flip,
+    switchApi: switches,
     get isOpen() { return open; },
     get target() { return target; },
     get writes() { return writes; },

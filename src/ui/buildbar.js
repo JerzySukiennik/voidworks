@@ -1,6 +1,6 @@
 // Voidworks — the build catalogue: grouped tiles that teach the upgrader colour system while you shop.
 
-import { BUILDBAR, ITEMS, SURFACE } from '../config.js';
+import { BUILDBAR, ITEMS, SURFACE, DELIVERY } from '../config.js';
 import { paneColorFor } from '../world/buildings.js';
 import { iconFor, groupGlyph, trashGlyph } from './buildbar-icons.js';
 
@@ -174,7 +174,14 @@ function el(tag, cls, parent, html) {
 const BELT_EFFECT = {
   belt_turn: 'corner', belt_merge: '3→1', belt_split: '1→3',
   belt_ramp_up: 'up', belt_ramp_down: 'down', belt_elev: 'deck',
+  belt_switch: '1→1', sorter: 'sort',
 };
+
+// The pad that reads the order board. Asked by shape, not by id — `delivery` is the name the
+// catalogue now uses and `tierPad` is the flag older pieces still branch on, so both answer.
+function isDelivery(def) {
+  return !!def && def.family === 'sell' && !!(def.delivery || def.orderPad || def.tierPad);
+}
 
 // The headline is the number a player compares two entries by; where there is no number it is the
 // tersest possible verb. Nothing here is decorative.
@@ -187,6 +194,11 @@ function effectOf(def) {
     return `×${def.upg.amount}`;
   }
   if (def.id === 'sellpad') return 'sell';
+  // The Delivery Pad fell through to '' and rendered with a blank headline — the same hole its
+  // missing glyph left, one row down. Its headline is the number you actually compare it to the
+  // plain pad by: what it pays for a material an order wants.
+  if (isDelivery(def)) return `×${DELIVERY.wantedMult}`;
+  if (def.family === 'sell') return 'sell';
   if (def.store) return `${def.store.cap} held`;
   if (def.fuse) return `4 → 1`;
   return '';
@@ -205,6 +217,8 @@ function longEffectOf(def) {
     return `×${def.upg.amount} item value`;
   }
   if (def.id === 'sellpad') return 'Converts an item to money, frees its slot';
+  if (isDelivery(def)) return `×${DELIVERY.wantedMult} for a material an order wants — everything else destroyed`;
+  if (def.family === 'sell') return 'Converts an item to money, frees its slot';
   if (def.store) return `Holds ${def.store.cap}, releases ${def.store.rate}/s`;
   if (def.fuse) return `4 items → 1 of the next tier at ×${def.fuse.bonus}`;
   return '—';
@@ -310,6 +324,10 @@ export function createBuildbar(world) {
       const color = def.family === 'upgrader' ? paneColorFor(def.upg) : g.tint;
       if (i > 0 && special(def) > special(g.defs[i - 1])) el('div', 'vw-shelf-gap', shelf);
       const node = el('div', 'vw-tile', shelf);
+      // Which machine this tile is. Nothing in the bar reads it — the tiles are held in a Map keyed
+      // by def — but a test that wants to prove every machine has a glyph should not have to match
+      // on a display name that is allowed to change.
+      node.dataset.id = def.id;
       el('div', 'vw-tile-key', node, String(i + 1));
       if (def.cells.length > 1) el('div', 'vw-tile-fp', node, '2×2');
       el('div', 'vw-tile-lock', node, LOCK_GLYPH);

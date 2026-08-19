@@ -6,7 +6,15 @@ Every file here is a GLB, glTF binary, Draco off, authored in Blender and export
 (round 2 rebuild — `build_all()` regenerates all 22 files from scratch); proof renders
 `work/blender/r2-*.png`.
 
-**A file only loads if its basename is listed in `manifest.json`.** All 22 below are listed.
+**A file only loads if its basename is listed in `manifest.json`.** All 28 below are listed.
+
+`belt-switch` is built FROM `belt-splitter` (`vwbuild2.py` `_belt_switch`) rather than modelled
+separately, so the two keep one plinth and one junction silhouette. They differ in what the amber
+means: the splitter's three equal arrows say the stream divides, the switch's single raised button
+says you press it to choose. The switch deliberately bakes NO direction arrow — which arm is live
+is drawn in-game from the building's own lane, and a baked arrow would be a second source of truth.
+Its button sits on the hub top MEASURED from the mesh, not a guessed height: the first attempt
+assumed one and buried the button inside a corner post.
 
 `build_all()` is **idempotent** — running it twice against an already-built `.blend` gives
 byte-identical tri counts and bounds (verified). That is not free: the first attempt joined a

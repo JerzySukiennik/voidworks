@@ -267,7 +267,16 @@ export function createEconomy() {
         life: lifeEarned,
         pp: points,
         pc: prestiges,
-        b: buildings.map((b) => [b.def.id, b.cx, b.cz, b.rot]),
+        // A 5th element carries per-building STATE that the player set by hand — a Switch's live arm,
+        // a filter pad's chosen material. Appended rather than folded into a new field so a v3 save
+        // written before this existed still reads: the extra slot is simply absent.
+        // Co-op does NOT yet carry this (the shared RTDB rules reject unknown fields on a build
+        // entry), so a switch set in a co-op room is still local to the player who set it.
+        b: buildings.map((b) => {
+          const st = b.switchArm !== undefined ? b.switchArm
+            : b.filterTier !== undefined ? b.filterTier : undefined;
+          return st === undefined ? [b.def.id, b.cx, b.cz, b.rot] : [b.def.id, b.cx, b.cz, b.rot, st];
+        }),
         u: upgradeSnapshot(buildings),
       };
     },

@@ -2,10 +2,11 @@
 // refund, and the undo stack.
 
 import * as THREE from 'three';
-import { BUILD, GRID, UNDO } from '../config.js';
+import { BUILD, GRID, UNDO, SWITCH_UI } from '../config.js';
 import { createPicker, dirBetween, inBounds } from '../world/grid.js';
-import { getDef, paneColorFor } from '../world/buildings.js';
+import { getDef, paneColorFor, hasFilter } from '../world/buildings.js';
 import { makeGhost, paintGhost, ghostMaterials } from './ghost.js';
+import { createSwitchApi } from './switch-api.js';
 
 const MAX_RUN = 64;
 
@@ -113,11 +114,167 @@ export function createPlacement(ctx) {
   let dragFrom = null;
   let rightDown = false;
   let rightMoved = false;
+  //   leftIdle   — the left button went down with NO build tool in hand. That gesture currently does
+  //                nothing at all, which is exactly why the switch's button can have it: it is told
+  //                from a camera orbit by the same BUILD.clickSlop the right-click inspect uses, so
+  //                dragging the view over a switch never throws its points.
+  let leftIdle = false;
   let pressX = 0;
   let pressY = 0;
   const runCells = [];
   const listeners = [];
   const inspectCbs = [];
+
+  // --- the switch conveyor: input, and the marker that makes it readable ------
+  //
+  // The affordance problem this solves: a switch that holds its setting is only useful if you can
+  // SEE the setting. Opening a panel per tile to find out which way twelve switches point is not a
+  // factory you can read, so every placed switch carries a chevron on its live exit, drawn from the
+  // building's own baked lane — the same source the hologram derives its arrows from, so the marker
+  // and the actual path of the items can never disagree.
+  //
+  // It rides the placement layer, which is already excluded from the occlusion buffer and from
+  // shadows, and it is rebuilt only when the set of switches or one of their settings changed.
+
+  const switches = createSwitchApi(world);
+  const M = SWITCH_UI.marker;
+
+  const swLayer = new THREE.Group();
+  swLayer.name = 'switch-marks';
+  layer.add(swLayer);
+  // markTransparent() traverses at CALL time, so a group added to `layer` after noAO(layer) ran
+  // inherits nothing. Marked here, and every mark mesh marked as it is born, or the chevrons would
+  // smear the occlusion buffer across the factory they are annotating.
+  noAO(swLayer);
+
+  const swGeo = new THREE.ConeGeometry(M.size, M.size * 1.9, 4);
+  const swMat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(M.color), transparent: true, opacity: M.opacity, depthTest: false,
+  });
+  const swTailMat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(M.color), transparent: true, opacity: M.tailOpacity, depthTest: false,
+  });
+  const swMarks = [];
+  const _UP = new THREE.Vector3(0, 1, 0);
+  const _p = new THREE.Vector3();
+  const _d = new THREE.Vector3();
+  let swKey = '';
+  let swAcc = 0;
+
+  function swMark(i) {
+    let m = swMarks[i];
+    if (!m) {
+      m = new THREE.Mesh(swGeo, swMat);
+      m.castShadow = false;
+      m.receiveShadow = false;
+      m.renderOrder = 6;
+      m.visible = false;
+      swLayer.add(m);
+      noAO(m);
+      swMarks[i] = m;
+    }
+    return m;
+  }
+
+  // Position and heading at fraction `u` of a baked lane. `pts` is already in world space and `cum`
+  // is arc length, so this is the honest point along the path rather than a lerp between endpoints —
+  // which matters on the curved arms, where the two are visibly different places.
+  function laneAt(lane, u, pos, dir) {
+    const n = lane && lane.n;
+    if (!n || n < 2) return false;
+    const want = lane.cum[n - 1] * u;
+    let i = 1;
+    while (i < n - 1 && lane.cum[i] < want) i += 1;
+    const t0 = lane.cum[i - 1];
+    const t1 = lane.cum[i];
+    const f = t1 > t0 ? (want - t0) / (t1 - t0) : 0;
+    const a = (i - 1) * 3;
+    const b2 = i * 3;
+    pos.set(
+      lane.pts[a] + (lane.pts[b2] - lane.pts[a]) * f,
+      lane.pts[a + 1] + (lane.pts[b2 + 1] - lane.pts[a + 1]) * f + M.lift,
+      lane.pts[a + 2] + (lane.pts[b2 + 2] - lane.pts[a + 2]) * f,
+    );
+    dir.set(lane.pts[b2] - lane.pts[a], lane.pts[b2 + 1] - lane.pts[a + 1], lane.pts[b2 + 2] - lane.pts[a + 2]);
+    if (dir.lengthSq() < 1e-9) return false;
+    dir.normalize();
+    return true;
+  }
+
+  function markSwitchesDirty() { swKey = ''; }
+
+  // Rebuilt from a KEY, not every frame: uid + arm for every switch standing. A factory whose
+  // switches nobody touched costs one string build per SWITCH_UI.marker.poll and no scene writes.
+  function refreshSwitchMarks() {
+    const list = [];
+    let key = '';
+    const all = world.buildings;
+    if (all && all.values) {
+      for (const b of all.values()) {
+        if (!switches.isSwitch(b.def)) continue;
+        const arm = switches.armOf(b);
+        key += `${b.uid}:${arm};`;
+        if (list.length < M.max) list.push({ b, arm });
+      }
+    }
+    if (key === swKey) return;
+    swKey = key;
+
+    let n = 0;
+    // A switch whose lanes are not baked yet — placed this frame, or mid-relink — has no path to
+    // hang a chevron on. Cacheing THAT as the answer would be a permanent miss: the key would not
+    // change again until the player touched the switch, so the marker would simply never appear.
+    // Misses drop the key instead, and the next poll tries again.
+    let missed = 0;
+    for (let i = 0; i < list.length; i += 1) {
+      const lane = switches.laneForArm(list[i].b, list[i].arm);
+      if (!lane) { missed += 1; continue; }
+      if (laneAt(lane, M.along, _p, _d)) {
+        const m = swMark(n);
+        n += 1;
+        m.material = swMat;
+        m.visible = true;
+        m.position.copy(_p);
+        m.quaternion.setFromUnitVectors(_UP, _d);
+      }
+      // The second, dimmer chevron of the trail — further back along the SAME arm, never at the
+      // tile's entry, which is where the model puts its warn-coloured button.
+      if (laneAt(lane, M.tailAlong, _p, _d)) {
+        const m = swMark(n);
+        n += 1;
+        m.material = swTailMat;
+        m.visible = true;
+        m.position.copy(_p);
+        m.quaternion.setFromUnitVectors(_UP, _d);
+      }
+    }
+    for (let i = n; i < swMarks.length; i += 1) swMarks[i].visible = false;
+    if (missed) swKey = '';
+  }
+
+  // The one place a switch is thrown, whoever asked. The inspector's button routes here through the
+  // shared adapter and announces on the same hook, so the panel and the marker are never one gesture
+  // out of step with each other.
+  function flipSwitch(b) {
+    if (!b || !switches.isSwitch(b.def)) return -1;
+    const arm = switches.toggle(b);
+    sfx(arm >= 0 ? 'rotate' : 'denied', b.cx, b.cz);
+    // Dispatched through the hook rather than by repainting here, so a listener chained on TOP of
+    // this module's hook still hears it. The chain ends at `switchHook`, which is what repaints.
+    if (typeof world.onSwitchChanged === 'function') world.onSwitchChanged(b, arm);
+    else { markSwitchesDirty(); refreshSwitchMarks(); }
+    return arm;
+  }
+
+  // Chained, not assigned: whatever else in the build wants to hear about a thrown switch keeps
+  // hearing about it, and the marker repaints in the same gesture rather than on the next poll.
+  const prevSwitchHook = world.onSwitchChanged;
+  function switchHook(b, arm) {
+    if (typeof prevSwitchHook === 'function') prevSwitchHook(b, arm);
+    markSwitchesDirty();
+    refreshSwitchMarks();
+  }
+  world.onSwitchChanged = switchHook;
 
   function makeHelper() {
     const r = BUILD.helperRadius;
@@ -297,7 +454,7 @@ export function createPlacement(ctx) {
   // Sorter or Contract Pad that came back pointed at the wrong material would be a grid restored in
   // shape but not in state.
   function opRemoved(b) {
-    return { k: 'delete', defId: b.def.id, cx: b.cx, cz: b.cz, rot: b.rot, filter: b.filterTier };
+    return { k: 'delete', defId: b.def.id, cx: b.cx, cz: b.cz, rot: b.rot, filter: b.filterTier, arm: b.switchArm };
   }
 
   function beginAction() {
@@ -319,6 +476,9 @@ export function createPlacement(ctx) {
   function restorePiece(op) {
     const b = world.place(op.defId, op.cx, op.cz, op.rot, { free: true });
     if (b && op.filter !== undefined) b.filterTier = op.filter;
+    // A Switch undone back into existence must come back pointing where it pointed. Restored through
+    // the sim so the lanes agree with the field, the same reason restore() uses the setter.
+    if (b && op.arm !== undefined) world.flow.setSwitch(b, op.arm | 0);
     return b;
   }
 
@@ -354,7 +514,7 @@ export function createPlacement(ctx) {
       const op = ops[i];
       if (op.k !== 'place') continue;
       const b = world.buildings.get(op.uid);
-      const keep = { k: 'delete', defId: op.defId, cx: op.cx, cz: op.cz, rot: op.rot, filter: b.filterTier };
+      const keep = { k: 'delete', defId: op.defId, cx: op.cx, cz: op.cz, rot: op.rot, filter: b.filterTier, arm: b.switchArm };
       world.remove(b, { free: true });
       countsDown(op.defId);
       pulled.push(keep);
@@ -546,7 +706,19 @@ export function createPlacement(ctx) {
       hasCell = !!pickCell(e.clientX, e.clientY, cell, level());
       return;
     }
-    if (!active()) return;
+    // No build tool in hand: left-press is the switch's button. Nothing is decided here — the
+    // gesture might still turn into a camera orbit — so it is only armed, exactly as `pendingLay`
+    // arms a belt click, and resolved on release by distance travelled.
+    if (!active()) {
+      if (e.button !== 0 || !SWITCH_UI.clickWhenIdle) return;
+      ptr.x = e.clientX;
+      ptr.y = e.clientY;
+      hasCell = !!pickCell(e.clientX, e.clientY, cell, level());
+      pressX = e.clientX;
+      pressY = e.clientY;
+      leftIdle = hasCell;
+      return;
+    }
     ptr.x = e.clientX;
     ptr.y = e.clientY;
     hasCell = !!pickCell(e.clientX, e.clientY, cell, level());
@@ -585,6 +757,23 @@ export function createPlacement(ctx) {
       const target = hasCell ? deleteTarget() : null;
       // Empty space opens nothing — a panel that pops up over the void is noise, not information.
       if (target) emitInspect(target);
+      return;
+    }
+    if (leftIdle) {
+      leftIdle = false;
+      // It orbited the camera. A camera move is not a request to reroute a belt.
+      if (e.button !== 0 || movedFar(e)) return;
+      ptr.x = e.clientX;
+      ptr.y = e.clientY;
+      hasCell = !!pickCell(e.clientX, e.clientY, cell, level());
+      const hit = hasCell ? deleteTarget() : null;
+      // Only a switch consumes this click. Everything else keeps the old behaviour of a left-click
+      // on empty hands, which is to do nothing at all — silently swallowing clicks on ordinary
+      // machines would break the inspector's own click-away-to-dismiss.
+      if (hit && switches.isSwitch(hit.def)) {
+        e.stopPropagation();
+        flipSwitch(hit);
+      }
       return;
     }
     if (pendingLay && !dragging) {
@@ -638,11 +827,22 @@ export function createPlacement(ctx) {
     // The readout belongs to the HUD/buildbar, not here — this is only the input.
     if (e.key === 'f' || e.key === 'F') {
       const target = hasCell ? deleteTarget() : null;
-      if (target && target.def.filter) {
+      // Asked of the catalogue, never of a list kept here: when buildings.js stops giving a machine
+      // a filter, F stops offering it one, with no edit on this side.
+      if (target && hasFilter(target.def)) {
         const t = world.flow.cycleFilter(target, e.shiftKey ? -1 : 1);
         sfx('rotate', target.cx, target.cz);
         if (world.onFilterChanged) world.onFilterChanged(target, t);
       } else sfx('denied', cell.x, cell.z);
+      return;
+    }
+    // T: throw the switch under the pointer. The keyboard route exists because the click route is
+    // only available with an empty hand — mid-build, left-click belongs to placement and must keep
+    // belonging to it, and a player laying a run should still be able to set the points they just laid.
+    if (e.key === SWITCH_UI.key || e.key === SWITCH_UI.key.toUpperCase()) {
+      const hit = hasCell ? deleteTarget() : null;
+      if (hit && switches.isSwitch(hit.def)) flipSwitch(hit);
+      else sfx('denied', cell.x, cell.z);
       return;
     }
     if (e.key === 'r' || e.key === 'R') { rotate(e.shiftKey ? -1 : 1); return; }
@@ -666,6 +866,12 @@ export function createPlacement(ctx) {
     // panel can read def/rot/cx/cz/filterTier off it directly. Returns an unsubscribe function.
     onInspect,
     cycleFilter: (b, dir) => world.flow.cycleFilter(b, dir),
+    // The switch: the same call the click and the T key make, plus the adapter, so the inspector and
+    // a test suite drive exactly the path a player does rather than a parallel one.
+    flipSwitch,
+    switches,
+    refreshSwitchMarks,
+    switchMarks: () => swMarks.filter((m) => m.visible),
     undo,
     canUndo: () => undoStack.length > 0 && !coopBlocked(),
     get undoDepth() { return undoStack.length; },
@@ -673,7 +879,11 @@ export function createPlacement(ctx) {
     // Exposed so a save restore or a prestige reset can drop a stack that no longer describes a
     // world that exists. Undoing into a wiped board would resurrect buildings from a past life.
     clearUndo() { undoStack.length = 0; lastRefusal = null; },
-    update() {
+    update(dt) {
+      // Before the tool gate, deliberately: a switch's direction has to stay readable while the
+      // player is doing something else entirely, which is most of the time.
+      swAcc += dt || 0;
+      if (swAcc >= M.poll) { swAcc = 0; refreshSwitchMarks(); }
       if (!active()) { if (ghost) ghost.visible = false; helper.visible = false; hideRun(); return; }
       refreshValidity();
       updateGhost();
@@ -681,6 +891,10 @@ export function createPlacement(ctx) {
     dispose() {
       for (const [t, type, fn, opts] of listeners) t.removeEventListener(type, fn, opts);
       listeners.length = 0;
+      if (world.onSwitchChanged === switchHook) world.onSwitchChanged = prevSwitchHook;
+      swGeo.dispose();
+      swMat.dispose();
+      swTailMat.dispose();
       world.root.remove(layer);
     },
   };
